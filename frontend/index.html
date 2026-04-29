@@ -1,0 +1,734 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>创业模拟决策系统</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://unpkg.com/vue@3/dist/vue.global.prod.js"></script>
+    <script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
+    <script src="https://unpkg.com/axios@1.7.9/dist/axios.min.js"></script>
+  </head>
+  <body class="bg-slate-100 text-slate-900">
+    <div id="app"></div>
+    <script>
+      const TOKEN_KEY = "sim.token";
+      const API_KEY = "sim.api";
+      const api = axios.create({
+        baseURL: localStorage.getItem(API_KEY) || "http://localhost:8010",
+        timeout: 15000,
+      });
+      function token() {
+        return localStorage.getItem(TOKEN_KEY) || "";
+      }
+      api.interceptors.request.use((c) => {
+        const t = token();
+        if (t) c.headers.Authorization = `Bearer ${t}`;
+        return c;
+      });
+
+      function uuid() {
+        if (globalThis.crypto?.randomUUID) return globalThis.crypto.randomUUID();
+        const b = new Uint8Array(16);
+        for (let i = 0; i < 16; i++) b[i] = (Math.random() * 256) | 0;
+        b[6] = (b[6] & 0x0f) | 0x40;
+        b[8] = (b[8] & 0x3f) | 0x80;
+        const h = [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+        return `${h.slice(0, 8)}-${h.slice(8, 12)}-${h.slice(12, 16)}-${h.slice(16, 20)}-${h.slice(20)}`;
+      }
+
+      function errMsg(e) {
+        const d = e?.response?.data?.detail;
+        return typeof d === "string" ? d : e?.message || "请求失败";
+      }
+
+      const Session = Vue.reactive({ me: null });
+
+      const Login = {
+        setup() {
+          const u = Vue.ref("student1");
+          const p = Vue.ref("student123");
+          const apiBase = Vue.ref(api.defaults.baseURL);
+          const router = VueRouter.useRouter();
+          const msg = Vue.ref("");
+          async function testApi() {
+            try {
+              const r = await axios.get(`${apiBase.value.replace(/\/$/, "")}/health`);
+              msg.value = `API 可达: ${JSON.stringify(r.data)}`;
+            } catch (e) {
+              msg.value = `API 不可达: ${e.message}`;
+            }
+          }
+          async function login() {
+            msg.value = "";
+            try {
+              localStorage.setItem(API_KEY, apiBase.value);
+              api.defaults.baseURL = apiBase.value;
+              const r = await api.post("/auth/login", { username: u.value, password: p.value });
+              localStorage.setItem(TOKEN_KEY, r.data.access_token);
+              router.push("/app/overview");
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          return { u, p, apiBase, msg, testApi, login };
+        },
+        template: `<div class="min-h-screen flex items-center justify-center p-4">
+          <div class="w-full max-w-md bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-3">
+            <div class="text-lg font-semibold">登录</div>
+            <p class="text-xs text-slate-500">学生示例 <code class="bg-slate-100 px-1 rounded">student1 / student123</code>（也可用 <code class="bg-slate-100 px-1 rounded">student</code> 或 <code class="bg-slate-100 px-1 rounded">student2</code>，密码同为 <code class="bg-slate-100 px-1 rounded">student123</code>）；管理员 <code class="bg-slate-100 px-1 rounded">admin / admin123</code></p>
+            <input v-model="apiBase" class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="API 地址" />
+            <input v-model="u" class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="用户名" />
+            <input v-model="p" type="password" class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="密码" />
+            <div class="flex gap-2">
+              <button type="button" @click="testApi" class="px-3 py-2 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">测试 API</button>
+              <button type="button" @click="login" class="px-3 py-2 bg-slate-900 text-white rounded-lg text-sm hover:bg-slate-800">登录</button>
+            </div>
+            <div class="text-sm text-rose-600 whitespace-pre-wrap">{{ msg }}</div>
+          </div>
+        </div>`,
+      };
+
+      const Layout = {
+        setup() {
+          const router = VueRouter.useRouter();
+          async function loadMe() {
+            try {
+              const r = await api.get("/student/me");
+              Session.me = r.data;
+            } catch {
+              Session.me = null;
+            }
+          }
+          Vue.onMounted(loadMe);
+          function logout() {
+            localStorage.removeItem(TOKEN_KEY);
+            Session.me = null;
+            router.push("/");
+          }
+          return { Session, logout };
+        },
+        template: `<div class="min-h-screen flex flex-col md:flex-row">
+          <aside class="w-full md:w-56 shrink-0 bg-white border-b md:border-b-0 md:border-r border-slate-200">
+            <div class="p-4 border-b border-slate-100 font-semibold text-slate-800">创业模拟</div>
+            <nav class="p-2 space-y-1 text-sm">
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" active-class="bg-slate-200 font-medium" to="/app/overview">总览</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/company">团队/公司</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/wallet">黄金账户</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/transfer">公司转账</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/inventory">团队仓库</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/mine">原料开采</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/market">原料市场</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/my-trades">我的交易</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/admin">管理员</RouterLink>
+            </nav>
+            <div class="p-3 text-xs text-slate-500 border-t border-slate-100 mt-auto">
+              <div v-if="Session.me">{{ Session.me.username }}（{{ Session.me.role }}）</div>
+              <button type="button" @click="logout" class="mt-2 w-full px-2 py-1.5 border rounded-lg hover:bg-slate-50">退出</button>
+            </div>
+          </aside>
+          <main class="flex-1 p-4 md:p-6 overflow-auto">
+            <RouterView />
+          </main>
+        </div>`,
+      };
+
+      const Overview = {
+        setup() {
+          const msg = Vue.ref("");
+          Vue.onMounted(async () => {
+            try {
+              const r = await api.get("/student/me");
+              Session.me = r.data;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          });
+          return { Session, msg };
+        },
+        template: `<div class="max-w-3xl space-y-4">
+          <h1 class="text-xl font-semibold">总览</h1>
+          <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+            <div class="text-sm text-slate-600 mb-2">当前登录</div>
+            <pre class="text-xs bg-slate-50 p-3 rounded-lg overflow-auto">{{ JSON.stringify(Session.me, null, 2) }}</pre>
+            <p class="text-sm text-rose-600 mt-2">{{ msg }}</p>
+          </div>
+          <p class="text-sm text-slate-600">请先完成「团队/公司」创建；用管理员账号给公司发放黄金后再开采与交易。</p>
+        </div>`,
+      };
+
+      const Company = {
+        setup() {
+          const name = Vue.ref("");
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          async function create() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post("/student/company/create", { name: name.value });
+              ok.value = `已创建公司：${r.data.name}，ID：${r.data.company_id}`;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          return { name, msg, ok, create };
+        },
+        template: `<div class="max-w-xl space-y-4">
+          <h1 class="text-xl font-semibold">团队/公司</h1>
+          <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm space-y-3">
+            <label class="text-sm text-slate-600">公司名称</label>
+            <input v-model="name" class="w-full border border-slate-200 rounded-lg px-3 py-2" placeholder="例如：星火一队" />
+            <button type="button" @click="create" class="px-4 py-2 bg-slate-900 text-white rounded-lg text-sm">创建公司</button>
+            <p class="text-sm text-rose-600">{{ msg }}</p>
+            <p class="text-sm text-emerald-700">{{ ok }}</p>
+          </div>
+        </div>`,
+      };
+
+      const Wallet = {
+        setup() {
+          const bal = Vue.ref(null);
+          const ledger = Vue.ref([]);
+          const msg = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            try {
+              const [b, l] = await Promise.all([api.get("/student/gold/balance"), api.get("/student/gold/ledger", { params: { limit: 50 } })]);
+              bal.value = b.data;
+              ledger.value = l.data;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { bal, ledger, msg, load };
+        },
+        template: `<div class="max-w-4xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">黄金账户</h1>
+            <button type="button" @click="load" class="ml-auto px-3 py-1.5 border rounded-lg text-sm hover:bg-white">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <div v-if="bal" class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="bg-white border rounded-xl p-4 shadow-sm"><div class="text-xs text-slate-500">余额</div><div class="text-2xl font-semibold">{{ bal.balance }}</div></div>
+            <div class="bg-white border rounded-xl p-4 shadow-sm"><div class="text-xs text-slate-500">冻结</div><div class="text-2xl font-semibold">{{ bal.frozen }}</div></div>
+            <div class="bg-white border rounded-xl p-4 shadow-sm"><div class="text-xs text-slate-500">公司 ID</div><div class="text-xs font-mono break-all">{{ bal.company_id }}</div></div>
+          </div>
+          <div class="bg-white border rounded-xl overflow-hidden shadow-sm">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-slate-50">黄金变动历史</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b"><th class="px-3 py-2">时间</th><th class="px-3 py-2">原因</th><th class="px-3 py-2 text-right">金额</th></tr></thead>
+                <tbody>
+                  <tr v-for="r in ledger" :key="r.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 whitespace-nowrap">{{ r.created_at }}</td>
+                    <td class="px-3 py-2">{{ r.reason }}</td>
+                    <td class="px-3 py-2 text-right" :class="r.amount < 0 ? 'text-rose-600' : 'text-emerald-600'">{{ r.amount }}</td>
+                  </tr>
+                  <tr v-if="!ledger.length"><td colspan="3" class="px-3 py-8 text-center text-slate-500">暂无记录</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const Transfer = {
+        setup() {
+          const companies = Vue.ref([]);
+          const meBal = Vue.ref(null);
+          const toCompanyId = Vue.ref("");
+          const amount = Vue.ref(10);
+          const idem = Vue.ref(uuid());
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+
+          async function load() {
+            msg.value = "";
+            try {
+              const [c, b] = await Promise.all([api.get("/student/companies"), api.get("/student/gold/balance")]);
+              companies.value = c.data || [];
+              meBal.value = b.data;
+              if (!toCompanyId.value) {
+                const firstOther = companies.value.find((x) => x.id && x.id !== meBal.value?.company_id);
+                if (firstOther) toCompanyId.value = firstOther.id;
+              }
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+
+          async function submit() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post("/student/gold/transfer", {
+                to_company_id: toCompanyId.value,
+                amount: Number(amount.value),
+                idempotency_key: idem.value,
+              });
+              ok.value = `转账成功：${r.data.amount} → ${r.data.to_company_id}`;
+              idem.value = uuid();
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+
+          const myCompanyId = Vue.computed(() => meBal.value?.company_id || "");
+          const filteredCompanies = Vue.computed(() => (companies.value || []).filter((c) => c.id && c.id !== myCompanyId.value));
+
+          Vue.onMounted(load);
+          return { companies, meBal, toCompanyId, amount, idem, msg, ok, load, submit, filteredCompanies, myCompanyId };
+        },
+        template: `<div class="max-w-3xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">公司转账</h1>
+            <button type="button" @click="load" class="ml-auto px-3 py-1.5 border rounded-lg text-sm hover:bg-white">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="bg-white border rounded-xl p-4 shadow-sm">
+              <div class="text-xs text-slate-500">我的公司</div>
+              <div class="text-xs font-mono break-all mt-1">{{ myCompanyId || '—' }}</div>
+            </div>
+            <div class="bg-white border rounded-xl p-4 shadow-sm">
+              <div class="text-xs text-slate-500">当前余额</div>
+              <div class="text-2xl font-semibold mt-1" v-if="meBal">{{ meBal.balance }}</div>
+              <div class="text-xs text-slate-400 mt-1" v-else>—</div>
+            </div>
+            <div class="bg-white border rounded-xl p-4 shadow-sm">
+              <div class="text-xs text-slate-500">冻结</div>
+              <div class="text-2xl font-semibold mt-1" v-if="meBal">{{ meBal.frozen }}</div>
+              <div class="text-xs text-slate-400 mt-1" v-else>—</div>
+            </div>
+          </div>
+
+          <div class="bg-white border rounded-xl p-4 shadow-sm space-y-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-sm text-slate-600">收款公司</label>
+                <select v-model="toCompanyId" class="w-full mt-1 border rounded-lg px-3 py-2">
+                  <option v-for="c in filteredCompanies" :key="c.id" :value="c.id">{{ c.name }}（{{ c.id.slice(0, 8) }}...）</option>
+                </select>
+                <p class="text-xs text-slate-400 mt-1" v-if="!filteredCompanies.length">暂无其他公司（需要另一学生创建公司，或管理员创建公司）</p>
+              </div>
+              <div>
+                <label class="text-sm text-slate-600">金额（黄金）</label>
+                <input type="number" min="1" v-model.number="amount" class="w-full mt-1 border rounded-lg px-3 py-2" />
+              </div>
+            </div>
+            <div>
+              <label class="text-sm text-slate-600">幂等键</label>
+              <input v-model="idem" class="w-full mt-1 border rounded-lg px-3 py-2 font-mono text-xs" />
+            </div>
+            <button type="button" @click="submit" class="px-4 py-2 bg-slate-900 text-white rounded-lg text-sm" :disabled="!toCompanyId">确认转账</button>
+            <p class="text-sm text-emerald-700">{{ ok }}</p>
+          </div>
+        </div>`,
+      };
+
+      const Inventory = {
+        setup() {
+          const rows = Vue.ref([]);
+          const msg = Vue.ref("");
+          async function load() {
+            try {
+              const r = await api.get("/student/inventory");
+              rows.value = r.data;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { rows, msg, load };
+        },
+        template: `<div class="max-w-3xl space-y-4">
+          <div class="flex items-center gap-3"><h1 class="text-xl font-semibold">团队仓库</h1><button @click="load" class="ml-auto px-3 py-1.5 border rounded-lg text-sm">刷新</button></div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <div class="bg-white border rounded-xl overflow-hidden shadow-sm">
+            <table class="min-w-full text-sm">
+              <thead><tr class="text-left bg-slate-50 border-b text-slate-600"><th class="px-3 py-2">原料</th><th class="px-3 py-2 text-right">库存</th><th class="px-3 py-2 text-right">冻结</th></tr></thead>
+              <tbody>
+                <tr v-for="r in rows" :key="r.material" class="border-b border-slate-100">
+                  <td class="px-3 py-2">{{ r.material }}</td><td class="px-3 py-2 text-right">{{ r.qty }}</td><td class="px-3 py-2 text-right">{{ r.frozen }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>`,
+      };
+
+      const Mine = {
+        setup() {
+          const material = Vue.ref("R1");
+          const qty = Vue.ref(1);
+          const idem = Vue.ref(uuid());
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const bal = Vue.ref(null);
+          const inv = Vue.ref([]);
+
+          const UNIT_COST = { R1: 10, R2: 20, R3: 30 };
+          const estCost = Vue.computed(() => {
+            const q = Number(qty.value) || 0;
+            return q > 0 ? q * (UNIT_COST[material.value] || 0) : 0;
+          });
+
+          async function loadSnapshot() {
+            try {
+              const [b, i] = await Promise.all([api.get("/student/gold/balance"), api.get("/student/inventory")]);
+              bal.value = b.data;
+              inv.value = i.data;
+            } catch (e) {
+              // 不阻塞开采，只在页面上提示
+              msg.value = errMsg(e);
+            }
+          }
+
+          async function submit() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post("/student/mine", {
+                material: material.value,
+                qty: Number(qty.value),
+                idempotency_key: idem.value,
+              });
+              ok.value = `开采成功：原料 ${material.value} 数量 ${qty.value}，花费黄金 ${r.data.cost_gold}`;
+              idem.value = uuid();
+              await loadSnapshot();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+
+          Vue.onMounted(loadSnapshot);
+
+          return { material, qty, idem, msg, ok, submit, bal, inv, estCost, UNIT_COST };
+        },
+        template: `<div class="max-w-3xl space-y-4">
+          <h1 class="text-xl font-semibold">原料开采</h1>
+
+          <div class="grid grid-cols-1 md:grid-cols-3 gap-3">
+            <div class="bg-white border rounded-xl p-4 shadow-sm">
+              <div class="text-xs text-slate-500 mb-1">当前黄金余额</div>
+              <div class="text-2xl font-semibold" v-if="bal">{{ bal.balance }}</div>
+              <div class="text-xs text-slate-400" v-else>请先完成登录与公司创建</div>
+            </div>
+            <div class="bg-white border rounded-xl p-4 shadow-sm">
+              <div class="text-xs text-slate-500 mb-1">预计本次成本</div>
+              <div class="text-2xl font-semibold">{{ estCost }}</div>
+              <div class="text-xs text-slate-400">R1: {{ UNIT_COST.R1 }} / R2: {{ UNIT_COST.R2 }} / R3: {{ UNIT_COST.R3 }}</div>
+            </div>
+            <div class="bg-white border rounded-xl p-4 shadow-sm">
+              <div class="text-xs text-slate-500 mb-1">提示</div>
+              <div class="text-xs text-slate-600">开采会直接从黄金余额中扣费，失败不会扣钱；幂等键相同重复提交只算一次。</div>
+            </div>
+          </div>
+
+          <div class="bg-white border rounded-xl p-4 shadow-sm space-y-3">
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-sm text-slate-600">原料</label>
+                <select v-model="material" class="w-full mt-1 border rounded-lg px-3 py-2">
+                  <option>R1</option>
+                  <option>R2</option>
+                  <option>R3</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-sm text-slate-600">数量</label>
+                <input type="number" min="1" v-model.number="qty" class="w-full mt-1 border rounded-lg px-3 py-2" />
+              </div>
+            </div>
+            <div>
+              <label class="text-sm text-slate-600">幂等键</label>
+              <input v-model="idem" class="w-full mt-1 border rounded-lg px-3 py-2 font-mono text-xs" />
+              <p class="text-xs text-slate-400 mt-1">用于防重复：刷新页面会自动生成新的幂等键，通常不需要改。</p>
+            </div>
+            <button type="button" @click="submit" class="px-4 py-2 bg-slate-900 text-white rounded-lg text-sm">提交开采</button>
+            <p class="text-sm text-rose-600">{{ msg }}</p>
+            <p class="text-sm text-emerald-700 break-all">{{ ok }}</p>
+          </div>
+
+          <div class="bg-white border rounded-xl overflow-hidden shadow-sm" v-if="inv && inv.length">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-slate-50">当前团队仓库</div>
+            <table class="min-w-full text-sm">
+              <thead>
+                <tr class="text-left bg-slate-50 border-b text-slate-600">
+                  <th class="px-3 py-2">原料</th>
+                  <th class="px-3 py-2 text-right">库存</th>
+                  <th class="px-3 py-2 text-right">冻结</th>
+                </tr>
+              </thead>
+              <tbody>
+                <tr v-for="r in inv" :key="r.material" class="border-b border-slate-100">
+                  <td class="px-3 py-2">{{ r.material }}</td>
+                  <td class="px-3 py-2 text-right">{{ r.qty }}</td>
+                  <td class="px-3 py-2 text-right">{{ r.frozen }}</td>
+                </tr>
+              </tbody>
+            </table>
+          </div>
+        </div>`,
+      };
+
+      const Market = {
+        setup() {
+          const listings = Vue.ref([]);
+          const filter = Vue.ref("");
+          const msg = Vue.ref("");
+          const newMat = Vue.ref("R1");
+          const newQty = Vue.ref(1);
+          const newPrice = Vue.ref(10);
+          const newIdem = Vue.ref(uuid());
+          const buyQty = Vue.ref(1);
+          const buyIdem = Vue.ref(uuid());
+          const myCompanyId = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            try {
+              const [r, b] = await Promise.all([
+                api.get("/market/listings", { params: filter.value ? { material: filter.value } : {} }),
+                api.get("/student/gold/balance"),
+              ]);
+              listings.value = r.data;
+              myCompanyId.value = b.data?.company_id || "";
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function postListing() {
+            try {
+              await api.post("/market/listings", {
+                material: newMat.value,
+                qty: Number(newQty.value),
+                unit_price: Number(newPrice.value),
+                idempotency_key: newIdem.value,
+              });
+              newIdem.value = uuid();
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function cancel(id) {
+            try {
+              await api.post(`/market/listings/${id}/cancel`, null, { params: { idempotency_key: uuid() } });
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function buy(id) {
+            try {
+              await api.post(`/market/listings/${id}/buy`, { qty: Number(buyQty.value), idempotency_key: buyIdem.value });
+              buyIdem.value = uuid();
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { listings, filter, msg, load, newMat, newQty, newPrice, newIdem, postListing, buyQty, buyIdem, buy, cancel, myCompanyId };
+        },
+        template: `<div class="max-w-5xl space-y-4">
+          <div class="flex flex-wrap items-center gap-2">
+            <h1 class="text-xl font-semibold">原料市场</h1>
+            <select v-model="filter" @change="load" class="border rounded-lg px-2 py-1 text-sm">
+              <option value="">全部</option><option>R1</option><option>R2</option><option>R3</option>
+            </select>
+            <button type="button" @click="load" class="ml-auto px-3 py-1.5 border rounded-lg text-sm">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="bg-white border rounded-xl p-4 shadow-sm space-y-2">
+              <div class="font-medium text-sm">发布挂单（卖出）</div>
+              <div class="grid grid-cols-2 gap-2 text-sm">
+                <select v-model="newMat" class="border rounded-lg px-2 py-2"><option>R1</option><option>R2</option><option>R3</option></select>
+                <input type="number" min="1" v-model.number="newQty" class="border rounded-lg px-2 py-2" placeholder="数量" />
+                <input type="number" min="1" v-model.number="newPrice" class="border rounded-lg px-2 py-2" placeholder="单价(黄金)" />
+                <input v-model="newIdem" class="border rounded-lg px-2 py-2 font-mono text-xs" />
+              </div>
+              <button type="button" @click="postListing" class="px-3 py-2 bg-slate-900 text-white rounded-lg text-sm">发布</button>
+            </div>
+            <div class="bg-white border rounded-xl p-4 shadow-sm space-y-2">
+              <div class="font-medium text-sm">买入</div>
+              <div class="flex gap-2 text-sm">
+                <input type="number" min="1" v-model.number="buyQty" class="border rounded-lg px-2 py-2 w-24" />
+                <input v-model="buyIdem" class="border rounded-lg px-2 py-2 flex-1 font-mono text-xs" />
+              </div>
+              <p class="text-xs text-slate-500">先在市场列表点「买入」会使用上方数量与幂等键。</p>
+            </div>
+          </div>
+          <div class="bg-white border rounded-xl overflow-hidden shadow-sm">
+            <table class="min-w-full text-sm">
+              <thead><tr class="text-left bg-slate-50 border-b text-slate-600">
+                <th class="px-3 py-2">原料</th><th class="px-3 py-2 text-right">数量</th><th class="px-3 py-2 text-right">已成交</th><th class="px-3 py-2 text-right">单价</th><th class="px-3 py-2">状态</th><th class="px-3 py-2"></th>
+              </tr></thead>
+              <tbody>
+                <tr v-for="L in listings" :key="L.id" class="border-b border-slate-100">
+                  <td class="px-3 py-2">{{ L.material }}</td>
+                  <td class="px-3 py-2 text-right">{{ L.qty }}</td>
+                  <td class="px-3 py-2 text-right">{{ L.filled_qty }}</td>
+                  <td class="px-3 py-2 text-right">{{ L.unit_price }}</td>
+                  <td class="px-3 py-2 font-mono text-xs">{{ L.status }}</td>
+                  <td class="px-3 py-2 space-x-2">
+                    <button type="button" @click="buy(L.id)" class="text-emerald-700 hover:underline">买入</button>
+                    <button v-if="myCompanyId && L.seller_company_id === myCompanyId" type="button" @click="cancel(L.id)" class="text-slate-600 hover:underline">撤单</button>
+                  </td>
+                </tr>
+                <tr v-if="!listings.length"><td colspan="6" class="px-3 py-8 text-center text-slate-500">暂无挂单</td></tr>
+              </tbody>
+            </table>
+          </div>
+        </div>`,
+      };
+
+      const MyTrades = {
+        setup() {
+          const listings = Vue.ref([]);
+          const trades = Vue.ref([]);
+          const msg = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            try {
+              const [a, b] = await Promise.all([api.get("/student/my/listings"), api.get("/student/my/trades")]);
+              listings.value = a.data;
+              trades.value = b.data;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { listings, trades, msg, load };
+        },
+        template: `<div class="max-w-5xl space-y-4">
+          <div class="flex items-center gap-2"><h1 class="text-xl font-semibold">我的交易</h1><button @click="load" class="ml-auto px-3 py-1.5 border rounded-lg text-sm">刷新</button></div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
+            <div class="bg-white border rounded-xl overflow-hidden shadow-sm">
+              <div class="px-3 py-2 border-b text-sm font-medium bg-slate-50">我的挂单</div>
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b"><th class="px-3 py-2">时间</th><th class="px-3 py-2">原料</th><th class="px-3 py-2 text-right">量</th><th class="px-3 py-2">状态</th></tr></thead>
+                <tbody>
+                  <tr v-for="L in listings" :key="L.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 text-xs whitespace-nowrap">{{ L.created_at }}</td>
+                    <td class="px-3 py-2">{{ L.material }}</td>
+                    <td class="px-3 py-2 text-right">{{ L.qty }}</td>
+                    <td class="px-3 py-2 text-xs">{{ L.status }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="bg-white border rounded-xl overflow-hidden shadow-sm">
+              <div class="px-3 py-2 border-b text-sm font-medium bg-slate-50">我的成交</div>
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b"><th class="px-3 py-2">时间</th><th class="px-3 py-2">原料</th><th class="px-3 py-2 text-right">总价</th></tr></thead>
+                <tbody>
+                  <tr v-for="t in trades" :key="t.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 text-xs whitespace-nowrap">{{ t.created_at }}</td>
+                    <td class="px-3 py-2">{{ t.material }} × {{ t.qty }}</td>
+                    <td class="px-3 py-2 text-right">{{ t.total_price }}</td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const Admin = {
+        setup() {
+          const cname = Vue.ref("系统公司A");
+          const cid = Vue.ref("");
+          const amount = Vue.ref(10000);
+          const idem = Vue.ref(uuid());
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          async function createCo() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post("/admin/companies", { name: cname.value });
+              cid.value = r.data.id;
+              ok.value = `公司已创建：${r.data.name}，ID：${r.data.id}`;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function grant() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(`/admin/companies/${cid.value}/grant-gold`, null, {
+                params: { amount: amount.value, idempotency_key: idem.value },
+              });
+              ok.value = "发放成功";
+              idem.value = uuid();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          return { cname, cid, amount, idem, msg, ok, createCo, grant };
+        },
+        template: `<div class="max-w-xl space-y-4">
+          <h1 class="text-xl font-semibold">管理员</h1>
+          <p class="text-sm text-slate-600">需使用 <code class="bg-slate-100 px-1 rounded">admin</code> 登录。先创建公司（可选）或把学生公司的 ID 粘贴到发放框。</p>
+          <div class="bg-white border rounded-xl p-4 shadow-sm space-y-3">
+            <label class="text-sm">新建公司名</label>
+            <input v-model="cname" class="w-full border rounded-lg px-3 py-2" />
+            <button type="button" @click="createCo" class="px-3 py-2 bg-slate-900 text-white rounded-lg text-sm">创建公司</button>
+            <label class="text-sm">公司 ID（发放用）</label>
+            <input v-model="cid" class="w-full border rounded-lg px-3 py-2 font-mono text-xs" placeholder="粘贴 company_id" />
+            <label class="text-sm">发放黄金数量</label>
+            <input type="number" min="1" v-model.number="amount" class="w-full border rounded-lg px-3 py-2" />
+            <label class="text-sm">幂等键</label>
+            <input v-model="idem" class="w-full border rounded-lg px-3 py-2 font-mono text-xs" />
+            <button type="button" @click="grant" class="px-3 py-2 bg-emerald-600 text-white rounded-lg text-sm">发放黄金</button>
+            <p class="text-sm text-rose-600">{{ msg }}</p>
+            <p class="text-sm text-emerald-700">{{ ok }}</p>
+          </div>
+        </div>`,
+      };
+
+      async function requireAuth() {
+        if (!token()) return "/";
+        return true;
+      }
+
+      const routes = [
+        { path: "/", component: Login, meta: { guest: true } },
+        {
+          path: "/app",
+          component: Layout,
+          beforeEnter: requireAuth,
+          children: [
+            { path: "", redirect: "/app/overview" },
+            { path: "overview", component: Overview },
+            { path: "company", component: Company },
+            { path: "wallet", component: Wallet },
+            { path: "transfer", component: Transfer },
+            { path: "inventory", component: Inventory },
+            { path: "mine", component: Mine },
+            { path: "market", component: Market },
+            { path: "my-trades", component: MyTrades },
+            { path: "admin", component: Admin },
+          ],
+        },
+      ];
+
+      const router = VueRouter.createRouter({
+        history: VueRouter.createWebHashHistory(),
+        routes,
+      });
+
+      const app = Vue.createApp({ template: "<RouterView/>" });
+      app.use(router);
+      app.mount("#app");
+    </script>
+  </body>
+</html>
