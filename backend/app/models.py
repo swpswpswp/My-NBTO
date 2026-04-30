@@ -26,6 +26,23 @@ class Match(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
 
+class MatchSetting(Base):
+    __tablename__ = "match_settings"
+    __table_args__ = (UniqueConstraint("match_id", name="uq_match_setting_match"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    initial_gold: Mapped[int] = mapped_column(Integer, default=0)
+    initial_carbon: Mapped[int] = mapped_column(Integer, default=0)
+    # material base price for valuation/export; keys R1/R2/R3...
+    material_r1_price: Mapped[int] = mapped_column(Integer, default=10)
+    material_r2_price: Mapped[int] = mapped_column(Integer, default=20)
+    material_r3_price: Mapped[int] = mapped_column(Integer, default=30)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    match: Mapped[Match] = relationship(Match)
+
+
 class User(Base):
     __tablename__ = "users"
 
@@ -62,6 +79,9 @@ class Company(Base):
     name: Mapped[str] = mapped_column(String(128))
     join_password_hash: Mapped[str] = mapped_column(String(256))
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    # 总资产导出用；后续可由管理员录入或从合同/报表同步
+    equity_value: Mapped[int] = mapped_column(Integer, default=0)
+    liability_value: Mapped[int] = mapped_column(Integer, default=0)
 
     match: Mapped[Match] = relationship(Match)
 
@@ -88,6 +108,7 @@ class CompanyAsset(Base):
     match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
     company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     gold_balance: Mapped[int] = mapped_column(Integer, default=0)
+    carbon_balance: Mapped[int] = mapped_column(Integer, default=0)
 
     company: Mapped[Company] = relationship(Company)
 
@@ -112,6 +133,7 @@ class LedgerEntry(Base):
     company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     kind: Mapped[str] = mapped_column(String(64))  # transfer_out, transfer_in, trade_out, trade_in ...
     gold_delta: Mapped[int] = mapped_column(Integer, default=0)
+    carbon_delta: Mapped[int] = mapped_column(Integer, default=0)
     material: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
     material_delta: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
     counterparty_company_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
@@ -155,3 +177,101 @@ class TradeRequest(Base):
     decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
     decided_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     settled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class FacilityType(Base):
+    __tablename__ = "facility_types"
+    __table_args__ = (UniqueConstraint("match_id", "code", name="uq_facility_match_code"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    code: Mapped[str] = mapped_column(String(64))  # e.g. mine_r1
+    name: Mapped[str] = mapped_column(String(128))
+    material: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)  # for mines
+    gold_cost: Mapped[int] = mapped_column(Integer, default=0)
+    carbon_cost: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class CompanyFacility(Base):
+    __tablename__ = "company_facilities"
+    __table_args__ = (UniqueConstraint("match_id", "company_id", "facility_type_id", name="uq_company_facility"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    facility_type_id: Mapped[str] = mapped_column(String(36), ForeignKey("facility_types.id", ondelete="CASCADE"), index=True)
+    qty: Mapped[int] = mapped_column(Integer, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Contract(Base):
+    __tablename__ = "contracts"
+    __table_args__ = (UniqueConstraint("match_id", "idempotency_key", name="uq_contract_idem"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    from_company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    to_company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    title: Mapped[str] = mapped_column(String(128))
+    content: Mapped[str] = mapped_column(String(2000))
+    status: Mapped[str] = mapped_column(String(16))  # pending/accepted/rejected
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    decided_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+    decided_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+
+
+class Product(Base):
+    __tablename__ = "products"
+    __table_args__ = (UniqueConstraint("match_id", "code", name="uq_product_match_code"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    code: Mapped[str] = mapped_column(String(64))
+    name: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class Recipe(Base):
+    __tablename__ = "recipes"
+    __table_args__ = (UniqueConstraint("match_id", "company_id", "product_id", name="uq_recipe_match_company_product"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    product_id: Mapped[str] = mapped_column(String(36), ForeignKey("products.id", ondelete="CASCADE"), index=True)
+    craft: Mapped[str] = mapped_column(String(512))  # 工艺/流程（先用文本，后续可结构化）
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+
+class RecipeItem(Base):
+    __tablename__ = "recipe_items"
+    __table_args__ = (UniqueConstraint("recipe_id", "material", name="uq_recipe_item_material"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    recipe_id: Mapped[str] = mapped_column(String(36), ForeignKey("recipes.id", ondelete="CASCADE"), index=True)
+    material: Mapped[str] = mapped_column(String(64))  # 原料 code（可扩展）
+    qty: Mapped[int] = mapped_column(Integer)
+
+
+class ProductListing(Base):
+    __tablename__ = "product_listings"
+    __table_args__ = (UniqueConstraint("match_id", "idempotency_key", name="uq_product_listing_idem"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    seller_company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    product_code: Mapped[str] = mapped_column(String(16))
+    qty: Mapped[int] = mapped_column(Integer)
+    unit_price_gold: Mapped[int] = mapped_column(Integer)
+    status: Mapped[str] = mapped_column(String(16))  # active/sold_out/cancelled
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+
+    rating_score: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    rating_comment: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
+    rated_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
+    rated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

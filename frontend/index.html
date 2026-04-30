@@ -9,18 +9,33 @@
     <script src="https://unpkg.com/vue-router@4/dist/vue-router.global.prod.js"></script>
     <script src="https://unpkg.com/axios@1.7.9/dist/axios.min.js"></script>
   </head>
-  <body class="bg-slate-100 text-slate-900">
+  <body class="bg-gradient-to-br from-purple-50 via-slate-50 to-fuchsia-50 text-slate-900">
     <div id="app"></div>
     <script>
       const TOKEN_KEY = "sim.token";
       const API_KEY = "sim.api";
+      const MATCH_KEY = "sim.matchKey";
+
       const api = axios.create({
         baseURL: localStorage.getItem(API_KEY) || "http://localhost:8010",
         timeout: 15000,
       });
+
       function token() {
         return localStorage.getItem(TOKEN_KEY) || "";
       }
+      function matchKey() {
+        return (localStorage.getItem(MATCH_KEY) || "").trim();
+      }
+      function setMatchKey(k) {
+        localStorage.setItem(MATCH_KEY, (k || "").trim());
+      }
+      function mpath(p) {
+        const mk = matchKey();
+        if (!mk) throw new Error("match_key_required");
+        return `/m/${encodeURIComponent(mk)}${p}`;
+      }
+
       api.interceptors.request.use((c) => {
         const t = token();
         if (t) c.headers.Authorization = `Bearer ${t}`;
@@ -42,47 +57,121 @@
         return typeof d === "string" ? d : e?.message || "请求失败";
       }
 
+      const UI = {
+        btnPrimary: "px-3 py-2 bg-purple-600 text-white rounded-lg text-sm hover:bg-purple-700 disabled:opacity-50 disabled:cursor-not-allowed",
+        btnGhost: "px-3 py-2 border border-slate-200 rounded-lg text-sm hover:bg-white/70",
+        card: "bg-white/80 backdrop-blur border border-slate-200 rounded-xl shadow-sm",
+        input: "w-full border border-slate-200 rounded-lg px-3 py-2 text-sm bg-white/80 focus:outline-none focus:ring-2 focus:ring-purple-200",
+      };
+
       const Session = Vue.reactive({ me: null });
 
-      const Login = {
+      const Auth = {
         setup() {
-          const u = Vue.ref("student1");
-          const p = Vue.ref("student123");
+          const mode = Vue.ref("login"); // login | register
+          const u = Vue.ref("");
+          const p = Vue.ref("");
           const apiBase = Vue.ref(api.defaults.baseURL);
           const router = VueRouter.useRouter();
           const msg = Vue.ref("");
           async function testApi() {
+            msg.value = "";
             try {
               const r = await axios.get(`${apiBase.value.replace(/\/$/, "")}/health`);
-              msg.value = `API 可达: ${JSON.stringify(r.data)}`;
+              msg.value = `API 可达：${JSON.stringify(r.data)}`;
             } catch (e) {
-              msg.value = `API 不可达: ${e.message}`;
+              msg.value = `API 不可达：${e.message}`;
             }
           }
-          async function login() {
+          async function submit() {
             msg.value = "";
             try {
               localStorage.setItem(API_KEY, apiBase.value);
               api.defaults.baseURL = apiBase.value;
-              const r = await api.post("/auth/login", { username: u.value, password: p.value });
+              if (mode.value === "register") {
+                await api.post("/v2/auth/register", { username: u.value, password: p.value });
+              }
+              const r = await api.post("/v2/auth/login", { username: u.value, password: p.value });
               localStorage.setItem(TOKEN_KEY, r.data.access_token);
+              router.push("/match");
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          return { mode, u, p, apiBase, msg, testApi, submit, UI };
+        },
+        template: `<div class="min-h-screen flex items-center justify-center p-4">
+          <div class="w-full max-w-md ${UI.card} p-5 space-y-4">
+            <div>
+              <div class="text-lg font-semibold">创业模拟决策系统</div>
+              <div class="text-xs text-slate-500 mt-1">紫色主题 · 多赛场 · 点对点交易</div>
+            </div>
+
+            <div class="flex gap-2 text-sm">
+              <button type="button" @click="mode='login'" class="px-3 py-1.5 rounded-lg border" :class="mode==='login' ? 'border-purple-300 bg-purple-50 text-purple-700' : 'border-slate-200 hover:bg-white/60'">登录</button>
+              <button type="button" @click="mode='register'" class="px-3 py-1.5 rounded-lg border" :class="mode==='register' ? 'border-purple-300 bg-purple-50 text-purple-700' : 'border-slate-200 hover:bg-white/60'">注册</button>
+            </div>
+
+            <div class="space-y-2">
+              <label class="text-xs text-slate-500">API 地址</label>
+              <input v-model="apiBase" class="${UI.input}" placeholder="http://localhost:8010" />
+              <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                <div>
+                  <label class="text-xs text-slate-500">用户名（至少 3 位）</label>
+                  <input v-model="u" class="${UI.input}" placeholder="例如：s1x" />
+                </div>
+                <div>
+                  <label class="text-xs text-slate-500">密码（至少 6 位）</label>
+                  <input v-model="p" type="password" class="${UI.input}" placeholder="pass1234" />
+                </div>
+              </div>
+            </div>
+
+            <div class="flex gap-2">
+              <button type="button" @click="testApi" class="${UI.btnGhost}">测试 API</button>
+              <button type="button" @click="submit" class="${UI.btnPrimary} ml-auto">{{ mode==='login' ? '登录' : '注册并登录' }}</button>
+            </div>
+
+            <div class="text-sm text-rose-600 whitespace-pre-wrap">{{ msg }}</div>
+            <div class="text-xs text-slate-500">
+              提示：登录后需要选择赛场（match_key），再加入公司才能操作资产与交易。
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const MatchSelect = {
+        setup() {
+          const router = VueRouter.useRouter();
+          const mk = Vue.ref(matchKey() || "matchB");
+          const msg = Vue.ref("");
+          async function go() {
+            msg.value = "";
+            try {
+              setMatchKey(mk.value);
+              // quick sanity: call /student/me in match scope
+              await api.get(mpath("/student/me"));
               router.push("/app/overview");
             } catch (e) {
               msg.value = errMsg(e);
             }
           }
-          return { u, p, apiBase, msg, testApi, login };
+          return { mk, msg, go, UI };
         },
         template: `<div class="min-h-screen flex items-center justify-center p-4">
-          <div class="w-full max-w-md bg-white border border-slate-200 rounded-xl p-5 shadow-sm space-y-3">
-            <div class="text-lg font-semibold">登录</div>
-            <p class="text-xs text-slate-500">学生示例 <code class="bg-slate-100 px-1 rounded">student1 / student123</code>（也可用 <code class="bg-slate-100 px-1 rounded">student</code> 或 <code class="bg-slate-100 px-1 rounded">student2</code>，密码同为 <code class="bg-slate-100 px-1 rounded">student123</code>）；管理员 <code class="bg-slate-100 px-1 rounded">admin / admin123</code></p>
-            <input v-model="apiBase" class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="API 地址" />
-            <input v-model="u" class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="用户名" />
-            <input v-model="p" type="password" class="w-full border border-slate-200 rounded-lg px-3 py-2 text-sm" placeholder="密码" />
+          <div class="w-full max-w-lg ${UI.card} p-5 space-y-4">
+            <div class="flex items-center gap-2">
+              <div class="text-lg font-semibold">选择赛场</div>
+              <div class="ml-auto text-xs text-slate-500">路径模式：/m/&lt;match_key&gt;</div>
+            </div>
+            <div class="space-y-2">
+              <label class="text-xs text-slate-500">赛场 Key（例如：matchA、matchB）</label>
+              <input v-model="mk" class="${UI.input}" placeholder="matchB" />
+              <div class="text-xs text-slate-500">进入后，该赛场内的数据与其他赛场完全隔离。</div>
+            </div>
             <div class="flex gap-2">
-              <button type="button" @click="testApi" class="px-3 py-2 border border-slate-200 rounded-lg text-sm hover:bg-slate-50">测试 API</button>
-              <button type="button" @click="login" class="px-3 py-2 bg-slate-900 text-white rounded-lg text-sm hover:bg-slate-800">登录</button>
+              <RouterLink to="/" class="${UI.btnGhost}">返回登录</RouterLink>
+              <button type="button" @click="go" class="${UI.btnPrimary} ml-auto">进入赛场</button>
             </div>
             <div class="text-sm text-rose-600 whitespace-pre-wrap">{{ msg }}</div>
           </div>
@@ -92,39 +181,79 @@
       const Layout = {
         setup() {
           const router = VueRouter.useRouter();
+          const mk = Vue.computed(() => matchKey());
+          const nav = Vue.reactive({ market: false, product: false, admin: false });
           async function loadMe() {
             try {
-              const r = await api.get("/student/me");
+              const r = await api.get(mpath("/student/me"));
               Session.me = r.data;
             } catch {
               Session.me = null;
             }
           }
           Vue.onMounted(loadMe);
+          function toggle(group) {
+            nav[group] = !nav[group];
+          }
           function logout() {
             localStorage.removeItem(TOKEN_KEY);
             Session.me = null;
             router.push("/");
           }
-          return { Session, logout };
+          function switchMatch() {
+            router.push("/match");
+          }
+          return { Session, logout, mk, switchMatch, nav, toggle };
         },
         template: `<div class="min-h-screen flex flex-col md:flex-row">
-          <aside class="w-full md:w-56 shrink-0 bg-white border-b md:border-b-0 md:border-r border-slate-200">
-            <div class="p-4 border-b border-slate-100 font-semibold text-slate-800">创业模拟</div>
-            <nav class="p-2 space-y-1 text-sm">
-              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" active-class="bg-slate-200 font-medium" to="/app/overview">总览</RouterLink>
-              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/company">团队/公司</RouterLink>
-              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/wallet">黄金账户</RouterLink>
-              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/transfer">公司转账</RouterLink>
-              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/inventory">团队仓库</RouterLink>
-              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/mine">原料开采</RouterLink>
-              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/market">原料市场</RouterLink>
-              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/my-trades">我的交易</RouterLink>
-              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-slate-50" to="/app/admin">管理员</RouterLink>
+          <aside class="w-full md:w-60 shrink-0 bg-white/70 backdrop-blur border-b md:border-b-0 md:border-r border-slate-200">
+            <div class="p-4 border-b border-slate-100">
+              <div class="font-semibold text-slate-900">创业模拟</div>
+              <div class="text-xs text-purple-700 mt-1">赛场：<span class="font-mono">{{ mk || '未选择' }}</span></div>
+            </div>
+            <nav class="p-2 space-y-2 text-sm">
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/overview">总览</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/wallet">资产与账本</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/inventory">团队仓库</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/facilities">设施中心</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/mining">原料开采</RouterLink>
+              <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/contracts">合同留痕</RouterLink>
+
+              <button type="button" @click="toggle('market')" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/70 border border-transparent">
+                <span class="text-xs text-slate-500">市场交易</span>
+                <span class="ml-auto text-slate-400 text-xs font-mono">{{ nav.market ? 'v' : '>' }}</span>
+              </button>
+              <div v-if="nav.market" class="pl-2 space-y-1">
+                <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/transfer">公司转账（黄金/碳排）</RouterLink>
+                <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/trade">公司交易（点对点）</RouterLink>
+              </div>
+
+              <button type="button" @click="toggle('product')" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/70 border border-transparent">
+                <span class="text-xs text-slate-500">产品中心</span>
+                <span class="ml-auto text-slate-400 text-xs font-mono">{{ nav.product ? 'v' : '>' }}</span>
+              </button>
+              <div v-if="nav.product" class="pl-2 space-y-1">
+                <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/recipes">配方中心</RouterLink>
+                <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/manufacture">产品制造</RouterLink>
+                <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/sales">产品销售</RouterLink>
+              </div>
+
+              <button type="button" @click="toggle('admin')" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/70 border border-transparent">
+                <span class="text-xs text-slate-500">管理</span>
+                <span class="ml-auto text-slate-400 text-xs font-mono">{{ nav.admin ? 'v' : '>' }}</span>
+              </button>
+              <div v-if="nav.admin" class="pl-2 space-y-1">
+                <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/audit">管理端查账</RouterLink>
+                <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/rating">产品评分</RouterLink>
+                <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/admin">管理员</RouterLink>
+              </div>
             </nav>
             <div class="p-3 text-xs text-slate-500 border-t border-slate-100 mt-auto">
               <div v-if="Session.me">{{ Session.me.username }}（{{ Session.me.role }}）</div>
-              <button type="button" @click="logout" class="mt-2 w-full px-2 py-1.5 border rounded-lg hover:bg-slate-50">退出</button>
+              <div class="flex gap-2 mt-2">
+                <button type="button" @click="switchMatch" class="flex-1 px-2 py-1.5 border rounded-lg hover:bg-white/70">切换赛场</button>
+                <button type="button" @click="logout" class="flex-1 px-2 py-1.5 border rounded-lg hover:bg-white/70">退出</button>
+              </div>
             </div>
           </aside>
           <main class="flex-1 p-4 md:p-6 overflow-auto">
@@ -136,28 +265,1727 @@
       const Overview = {
         setup() {
           const msg = Vue.ref("");
+          const bal = Vue.ref(null);
           Vue.onMounted(async () => {
+            msg.value = "";
             try {
-              const r = await api.get("/student/me");
+              const r = await api.get(mpath("/student/me"));
               Session.me = r.data;
+              if (Session.me.company_id) {
+                const b = await api.get(mpath("/student/gold/balance"));
+                bal.value = b.data;
+              }
             } catch (e) {
               msg.value = errMsg(e);
             }
           });
-          return { Session, msg };
+          return { Session, msg, bal, UI };
         },
-        template: `<div class="max-w-3xl space-y-4">
-          <h1 class="text-xl font-semibold">总览</h1>
-          <div class="bg-white border border-slate-200 rounded-xl p-4 shadow-sm">
+        template: `<div class="max-w-4xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">总览</h1>
+            <div class="ml-auto text-xs text-slate-500">主题：紫色调</div>
+          </div>
+          <div class="${UI.card} p-4">
             <div class="text-sm text-slate-600 mb-2">当前登录</div>
-            <pre class="text-xs bg-slate-50 p-3 rounded-lg overflow-auto">{{ JSON.stringify(Session.me, null, 2) }}</pre>
+            <pre class="text-xs bg-white/60 p-3 rounded-lg overflow-auto border border-slate-100">{{ JSON.stringify(Session.me, null, 2) }}</pre>
             <p class="text-sm text-rose-600 mt-2">{{ msg }}</p>
           </div>
-          <p class="text-sm text-slate-600">请先完成「团队/公司」创建；用管理员账号给公司发放黄金后再开采与交易。</p>
+          <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+            <div class="${UI.card} p-4">
+              <div class="text-xs text-slate-500">是否已加入公司</div>
+              <div class="text-lg font-semibold mt-1">{{ Session.me?.company_id ? '已加入' : '未加入' }}</div>
+              <div class="text-xs font-mono text-slate-500 break-all mt-1" v-if="Session.me?.company_id">{{ Session.me.company_id }}</div>
+            </div>
+            <div class="${UI.card} p-4">
+              <div class="text-xs text-slate-500">黄金余额</div>
+              <div class="text-2xl font-semibold mt-1">{{ bal?.balance ?? '—' }}</div>
+              <div class="text-xs text-slate-500 mt-1">需先加入公司并由管理员发放黄金</div>
+            </div>
+            <div class="${UI.card} p-4">
+              <div class="text-xs text-slate-500">下一步</div>
+              <div class="text-sm text-slate-700 mt-2 space-y-1">
+                <div>1) 进入「加入公司」选择公司并输入加入密码</div>
+                <div>2) 管理员导入公司并发放黄金/原料</div>
+                <div>3) 使用「点对点交易」发起请求并让对方同意</div>
+              </div>
+              <div class="mt-3">
+                <RouterLink to="/app/company" class="${UI.btnPrimary}">去加入公司</RouterLink>
+              </div>
+            </div>
+          </div>
         </div>`,
       };
 
-      const Company = {
+      const CompanyJoin = {
+        setup() {
+          const companies = Vue.ref([]);
+          const companyId = Vue.ref("");
+          const joinPwd = Vue.ref("");
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.get(mpath("/student/companies"));
+              companies.value = r.data || [];
+              if (!companyId.value && companies.value.length) companyId.value = companies.value[0].id;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function join() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(mpath("/student/company/join"), { company_id: companyId.value, join_password: joinPwd.value });
+              ok.value = "加入成功（比赛期间不可退出/换公司）";
+              Session.me = (await api.get(mpath("/student/me"))).data;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { companies, companyId, joinPwd, msg, ok, load, join, UI, Session };
+        },
+        template: `<div class="max-w-3xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">加入公司</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="text-sm text-slate-600">请选择公司并输入“公司加入密码”。加入后不可退出/换公司。</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">公司</label>
+                <select v-model="companyId" class="${UI.input} mt-1">
+                  <option v-for="c in companies" :key="c.id" :value="c.id">{{ c.name }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">加入密码</label>
+                <input v-model="joinPwd" type="password" class="${UI.input} mt-1" placeholder="例如：join1234" />
+              </div>
+            </div>
+            <button type="button" @click="join" class="${UI.btnPrimary}" :disabled="!companyId || !joinPwd">确认加入</button>
+            <p class="text-sm text-emerald-700">{{ ok }}</p>
+            <div class="text-xs text-slate-500">当前 company_id：<span class="font-mono">{{ Session.me?.company_id || '—' }}</span></div>
+          </div>
+        </div>`,
+      };
+
+      const Wallet = {
+        setup() {
+          const bal = Vue.ref(null);
+          const carbon = Vue.ref(null);
+          const ledger = Vue.ref([]);
+          const msg = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            try {
+              const [b, c, l] = await Promise.all([
+                api.get(mpath("/student/gold/balance")),
+                api.get(mpath("/student/carbon/balance")),
+                api.get(mpath("/student/ledger"), { params: { limit: 50 } }),
+              ]);
+              bal.value = b.data;
+              carbon.value = c.data;
+              ledger.value = l.data;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { bal, carbon, ledger, msg, load, UI };
+        },
+        template: `<div class="max-w-5xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">资产与账本</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <div v-if="bal" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+            <div class="${UI.card} p-4">
+              <div class="text-xs text-slate-500">黄金余额</div>
+              <div class="text-2xl font-semibold mt-1">{{ bal.balance }}</div>
+            </div>
+            <div v-if="carbon" class="${UI.card} p-4">
+              <div class="text-xs text-slate-500">碳排放指标余额</div>
+              <div class="text-2xl font-semibold mt-1">{{ carbon.balance }}</div>
+            </div>
+            <div class="${UI.card} p-4"><div class="text-xs text-slate-500">公司 ID</div><div class="text-xs font-mono break-all mt-1">{{ bal.company_id }}</div></div>
+          </div>
+          <div class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">账本流水（最新在前）</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead>
+                  <tr class="text-left text-slate-500 border-b">
+                    <th class="px-3 py-2">时间</th>
+                    <th class="px-3 py-2">类型</th>
+                    <th class="px-3 py-2">对手方</th>
+                    <th class="px-3 py-2 text-right">黄金</th>
+                    <th class="px-3 py-2 text-right">碳排</th>
+                    <th class="px-3 py-2 text-right">原料</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  <tr v-for="r in ledger" :key="r.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 whitespace-nowrap text-xs">{{ r.created_at }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.kind }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.counterparty_company_id || '-' }}</td>
+                    <td class="px-3 py-2 text-right" :class="r.gold_delta < 0 ? 'text-rose-600' : (r.gold_delta>0?'text-emerald-700':'text-slate-500')">{{ r.gold_delta }}</td>
+                    <td class="px-3 py-2 text-right" :class="r.carbon_delta < 0 ? 'text-rose-600' : (r.carbon_delta>0?'text-emerald-700':'text-slate-500')">{{ r.carbon_delta }}</td>
+                    <td class="px-3 py-2 text-right font-mono text-xs">{{ r.material ? (r.material + ' ' + (r.material_delta ?? 0)) : '-' }}</td>
+                  </tr>
+                  <tr v-if="!ledger.length"><td colspan="6" class="px-3 py-8 text-center text-slate-500">暂无记录</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const CarbonTransfer = {
+        setup() {
+          const companies = Vue.ref([]);
+          const toCompanyId = Vue.ref("");
+          const amount = Vue.ref(10);
+          const idem = Vue.ref(uuid());
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.get(mpath("/student/companies"));
+              companies.value = r.data || [];
+              if (!toCompanyId.value && companies.value.length) toCompanyId.value = companies.value[0].id;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function submit() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/student/carbon/transfer"), {
+                to_company_id: toCompanyId.value,
+                amount: Number(amount.value),
+                idempotency_key: idem.value,
+              });
+              ok.value = `转账成功：${r.data.amount}`;
+              idem.value = uuid();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { companies, toCompanyId, amount, idem, msg, ok, load, submit, UI };
+        },
+        template: `<div class="max-w-3xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">公司转账（碳排放指标）</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新公司列表</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div>
+              <label class="text-xs text-slate-500">收款公司</label>
+              <select v-model="toCompanyId" class="${UI.input} mt-1">
+                <option v-for="c in companies" :key="c.id" :value="c.id">{{ c.name }}（{{ c.id.slice(0, 8) }}）</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">数量</label>
+                <input v-model.number="amount" type="number" min="1" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">幂等键</label>
+                <input v-model="idem" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+            </div>
+            <button type="button" @click="submit" class="${UI.btnPrimary}" :disabled="!toCompanyId || !amount || !idem">确认转账</button>
+          </div>
+        </div>`,
+      };
+
+      const FacilityCenter = {
+        setup() {
+          const facilities = Vue.ref([]);
+          const facilityTypes = Vue.ref([]);
+          const companiesFacilities = Vue.ref([]);
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const buyCode = Vue.ref("mine_r1");
+          const buyQty = Vue.ref(1);
+          const buyIdem = Vue.ref(uuid());
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const [r1, r2] = await Promise.all([api.get(mpath("/student/facilities")), api.get(mpath("/student/facility-types"))]);
+              facilities.value = r1.data || [];
+              facilityTypes.value = r2.data || [];
+              try {
+                const r3 = await api.get(mpath("/admin/facilities/companies"));
+                companiesFacilities.value = r3.data || [];
+              } catch {
+                companiesFacilities.value = [];
+              }
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function buy() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/student/facilities/buy"), { facility_code: buyCode.value, qty: Number(buyQty.value), idempotency_key: buyIdem.value });
+              ok.value = `购买成功：${r.data.facility_code} x${r.data.qty}（花费黄金 ${r.data.gold_cost} / 碳排 ${r.data.carbon_cost}）`;
+              buyIdem.value = uuid();
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { facilities, facilityTypes, companiesFacilities, msg, ok, buyCode, buyQty, buyIdem, load, buy, UI };
+        },
+        template: `<div class="max-w-4xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">设施中心</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="font-medium text-sm">我的设施</div>
+            <div v-if="facilities.length" class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div v-for="f in facilities" :key="f.facility_code" class="border border-slate-200 rounded-lg p-3 bg-white/60">
+                <div class="text-sm font-medium">{{ f.name }}</div>
+                <div class="text-xs text-slate-600 mt-1">code：<span class="font-mono">{{ f.facility_code }}</span></div>
+                <div class="text-xs text-slate-600">对应原料：{{ f.material || '-' }} · 数量：{{ f.qty }}</div>
+              </div>
+            </div>
+            <div v-else class="text-sm text-slate-500">暂无设施</div>
+          </div>
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="font-medium text-sm">购买设施</div>
+            <div class="text-xs text-slate-500">成本占位，赛后会统一配置；权限与玩法可后续绑定。</div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">设施</label>
+                <select v-model="buyCode" class="${UI.input} mt-1">
+                  <option value="mine_r1">R1矿场（mine_r1）</option>
+                  <option value="mine_r2">R2矿场（mine_r2）</option>
+                  <option value="mine_r3">R3矿场（mine_r3）</option>
+                  <option value="quarry">采石场（quarry）</option>
+                  <option value="forest">林场（forest）</option>
+                  <option value="farm">农场（farm）</option>
+                  <option value="ranch">养殖场（ranch）</option>
+                  <option value="fishery">渔场（fishery）</option>
+                  <option value="chemical_plant">化工场（chemical_plant）</option>
+                  <option value="explorer_camp">探险者营地（explorer_camp）</option>
+                  <option value="product_factory">产品制造工厂（product_factory）</option>
+                  <option value="department_store">百货大楼（department_store）</option>
+                  <option value="news_center">新闻中心（news_center）</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">数量</label>
+                <input v-model.number="buyQty" type="number" min="1" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">幂等键</label>
+                <input v-model="buyIdem" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+            </div>
+            <button type="button" @click="buy" class="${UI.btnPrimary}">购买</button>
+          </div>
+          <div class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">可购买设施列表（设施目录）</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b">
+                  <th class="px-3 py-2">code</th><th class="px-3 py-2">名称</th><th class="px-3 py-2">原料</th>
+                  <th class="px-3 py-2 text-right">黄金成本</th><th class="px-3 py-2 text-right">碳排成本</th>
+                </tr></thead>
+                <tbody>
+                  <tr v-for="f in facilityTypes" :key="f.code" class="border-b border-slate-100">
+                    <td class="px-3 py-2 font-mono text-xs">{{ f.code }}</td>
+                    <td class="px-3 py-2">{{ f.name }}</td>
+                    <td class="px-3 py-2">{{ f.material || '-' }}</td>
+                    <td class="px-3 py-2 text-right">{{ f.gold_cost }}</td>
+                    <td class="px-3 py-2 text-right">{{ f.carbon_cost }}</td>
+                  </tr>
+                  <tr v-if="!facilityTypes.length"><td colspan="5" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">全场设施列表（按公司）</div>
+            <div v-if="!companiesFacilities.length" class="px-4 py-6 text-sm text-slate-500">无数据或无权限（仅管理员可查看）。</div>
+            <div v-else class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b">
+                  <th class="px-3 py-2">公司</th><th class="px-3 py-2">设施</th>
+                </tr></thead>
+                <tbody>
+                  <tr v-for="c in companiesFacilities" :key="c.company_id" class="border-b border-slate-100">
+                    <td class="px-3 py-2">
+                      <div class="font-medium">{{ c.company_name }}</div>
+                      <div class="font-mono text-xs text-slate-500">{{ c.company_id }}</div>
+                    </td>
+                    <td class="px-3 py-2 font-mono text-xs">
+                      <span v-if="(c.facilities||[]).length">{{ (c.facilities||[]).map(x => x.code + '×' + x.qty).join(', ') }}</span>
+                      <span v-else class="text-slate-400">—</span>
+                    </td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const Mining = {
+        setup() {
+          const facilities = Vue.ref([]);
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const mineMaterial = Vue.ref("R1");
+          const mineQty = Vue.ref(1);
+          const mineIdem = Vue.ref(uuid());
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.get(mpath("/student/facilities"));
+              facilities.value = r.data || [];
+              const mineable = (facilities.value || []).filter((x) => x.facility_code && x.facility_code.startsWith("mine_")).map((x) => x.material);
+              if (mineable.length && !mineable.includes(mineMaterial.value)) mineMaterial.value = mineable[0];
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          const mineableMaterials = Vue.computed(() =>
+            (facilities.value || []).filter((x) => x.facility_code && x.facility_code.startsWith("mine_")).map((x) => x.material).filter(Boolean)
+          );
+          async function mine() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/student/mine"), { material: mineMaterial.value, qty: Number(mineQty.value), idempotency_key: mineIdem.value });
+              ok.value = `开采成功：${r.data.material} x${r.data.qty}（扣黄金 ${r.data.cost_gold} / 碳排 ${r.data.cost_carbon}）`;
+              mineIdem.value = uuid();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { facilities, msg, ok, mineMaterial, mineQty, mineIdem, load, mine, mineableMaterials, UI };
+        },
+        template: `<div class="max-w-4xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">原料开采</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="text-xs text-slate-500">需要对应矿场（mine_r1/mine_r2/mine_r3）。规则：每单位扣“黄金成本 + 等额碳排成本”，无冷却无限额。</div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">可开采原料</label>
+                <select v-model="mineMaterial" class="${UI.input} mt-1">
+                  <option v-for="m in mineableMaterials" :key="m">{{ m }}</option>
+                </select>
+                <div v-if="!mineableMaterials.length" class="text-xs text-rose-600 mt-2">你还没有矿场，请先去「设施中心」购买。</div>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">数量</label>
+                <input v-model.number="mineQty" type="number" min="1" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">幂等键</label>
+                <input v-model="mineIdem" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+            </div>
+            <button type="button" @click="mine" class="${UI.btnPrimary}" :disabled="!mineableMaterials.length">开采</button>
+          </div>
+        </div>`,
+      };
+
+      const Contracts = {
+        setup() {
+          const companies = Vue.ref([]);
+          const toCompanyId = Vue.ref("");
+          const title = Vue.ref("");
+          const content = Vue.ref("");
+          const inbox = Vue.ref([]);
+          const outbox = Vue.ref([]);
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const [c, i, o] = await Promise.all([
+                api.get(mpath("/student/companies")),
+                api.get(mpath("/contracts/inbox")),
+                api.get(mpath("/contracts/outbox")),
+              ]);
+              companies.value = c.data || [];
+              if (!toCompanyId.value && companies.value.length) toCompanyId.value = companies.value[0].id;
+              inbox.value = i.data || [];
+              outbox.value = o.data || [];
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function send() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/contract"), { to_company_id: toCompanyId.value, title: title.value, content: content.value, idempotency_key: uuid() });
+              ok.value = `已发送合同：${r.data.id}`;
+              title.value = "";
+              content.value = "";
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function decide(id, decision) {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(mpath(`/contract/${id}/decide`), { decision, idempotency_key: uuid() });
+              ok.value = "已处理";
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { companies, toCompanyId, title, content, inbox, outbox, msg, ok, load, send, decide, UI };
+        },
+        template: `<div class="max-w-5xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">合同（留痕备案）</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="font-medium text-sm">拟定并发送</div>
+            <div>
+              <label class="text-xs text-slate-500">接收公司</label>
+              <select v-model="toCompanyId" class="${UI.input} mt-1">
+                <option v-for="c in companies" :key="c.id" :value="c.id">{{ c.name }}（{{ c.id.slice(0, 8) }}）</option>
+              </select>
+            </div>
+            <div>
+              <label class="text-xs text-slate-500">标题</label>
+              <input v-model="title" class="${UI.input} mt-1" placeholder="例如：采购合同" />
+            </div>
+            <div>
+              <label class="text-xs text-slate-500">正文</label>
+              <textarea v-model="content" class="${UI.input} mt-1" rows="5" placeholder="写清交易/约定内容（仅留痕，不自动结算）"></textarea>
+            </div>
+            <button type="button" @click="send" class="${UI.btnPrimary}" :disabled="!toCompanyId || !title || !content">发送合同</button>
+          </div>
+          <div class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">收件箱</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b"><th class="px-3 py-2">时间</th><th class="px-3 py-2">发起方</th><th class="px-3 py-2">标题</th><th class="px-3 py-2">状态</th><th class="px-3 py-2 text-right">操作</th></tr></thead>
+                <tbody>
+                  <tr v-for="x in inbox" :key="x.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 text-xs whitespace-nowrap">{{ x.created_at }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ x.from_company_id }}</td>
+                    <td class="px-3 py-2">{{ x.title }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ x.status }}</td>
+                    <td class="px-3 py-2 text-right">
+                      <div class="flex justify-end gap-2" v-if="x.status==='pending'">
+                        <button type="button" class="${UI.btnPrimary}" @click="decide(x.id,'accept')">同意</button>
+                        <button type="button" class="${UI.btnGhost}" @click="decide(x.id,'reject')">拒绝</button>
+                      </div>
+                      <span v-else class="text-slate-500 text-xs">—</span>
+                    </td>
+                  </tr>
+                  <tr v-if="!inbox.length"><td colspan="5" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="px-4 py-2 border-t text-sm font-medium bg-white/60">发件箱</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b"><th class="px-3 py-2">时间</th><th class="px-3 py-2">接收方</th><th class="px-3 py-2">标题</th><th class="px-3 py-2">状态</th></tr></thead>
+                <tbody>
+                  <tr v-for="x in outbox" :key="x.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 text-xs whitespace-nowrap">{{ x.created_at }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ x.to_company_id }}</td>
+                    <td class="px-3 py-2">{{ x.title }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ x.status }}</td>
+                  </tr>
+                  <tr v-if="!outbox.length"><td colspan="4" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const AdminAudit = {
+        setup() {
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const ledger = Vue.ref([]);
+          const audits = Vue.ref([]);
+          const companyId = Vue.ref("");
+          const kind = Vue.ref("");
+          const action = Vue.ref("");
+          const limit = Vue.ref(200);
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const [l, a] = await Promise.all([
+                api.get(mpath("/admin/ledger"), { params: { company_id: companyId.value || undefined, kind: kind.value || undefined, limit: Number(limit.value) } }),
+                api.get(mpath("/admin/audit"), { params: { action: action.value || undefined, limit: Number(limit.value) } }),
+              ]);
+              ledger.value = l.data || [];
+              audits.value = a.data || [];
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          function dl(path, params) {
+            const base = (api.defaults.baseURL || "").replace(/\/$/, "");
+            const url = new URL(base + mpath(path));
+            Object.entries(params || {}).forEach(([k, v]) => {
+              if (v !== undefined && v !== null && String(v).trim() !== "") url.searchParams.set(k, String(v));
+            });
+            const a = document.createElement("a");
+            a.href = url.toString();
+            a.target = "_blank";
+            a.rel = "noopener";
+            // token via header not possible with simple <a>; use fetch->blob
+            return (async () => {
+              try {
+                const r = await fetch(url.toString(), { headers: { Authorization: `Bearer ${token()}` } });
+                if (!r.ok) throw new Error(r.statusText);
+                const blob = await r.blob();
+                const d = document.createElement("a");
+                d.href = URL.createObjectURL(blob);
+                d.download = path.includes("ledger") ? "ledger.csv" : "audit.csv";
+                d.click();
+                URL.revokeObjectURL(d.href);
+                ok.value = "已下载 CSV";
+              } catch (e) {
+                msg.value = e?.message || String(e);
+              }
+            })();
+          }
+          Vue.onMounted(load);
+          return { msg, ok, ledger, audits, companyId, kind, action, limit, load, dl, UI };
+        },
+        template: `<div class="max-w-6xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">管理端查账</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">公司ID（可空）</label>
+                <input v-model="companyId" class="${UI.input} mt-1 font-mono text-xs" placeholder="筛选 ledger" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">ledger kind（可空）</label>
+                <input v-model="kind" class="${UI.input} mt-1 font-mono text-xs" placeholder="例如 transfer_out" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">audit action（可空）</label>
+                <input v-model="action" class="${UI.input} mt-1 font-mono text-xs" placeholder="例如 mine / manufacture" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">limit</label>
+                <input v-model.number="limit" type="number" min="1" max="1000" class="${UI.input} mt-1" />
+              </div>
+            </div>
+            <div class="flex gap-2 flex-wrap">
+              <button type="button" @click="dl('/admin/export/ledger.csv', {company_id: companyId||undefined, kind: kind||undefined})" class="${UI.btnGhost}">导出 Ledger CSV</button>
+              <button type="button" @click="dl('/admin/export/audit.csv', {action: action||undefined})" class="${UI.btnGhost}">导出 Audit CSV</button>
+            </div>
+          </div>
+          <div class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">Ledger（流水）</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b">
+                  <th class="px-3 py-2">时间</th><th class="px-3 py-2">公司</th><th class="px-3 py-2">类型</th>
+                  <th class="px-3 py-2 text-right">黄金</th><th class="px-3 py-2 text-right">碳排</th><th class="px-3 py-2">物品</th>
+                </tr></thead>
+                <tbody>
+                  <tr v-for="r in ledger" :key="r.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 text-xs whitespace-nowrap">{{ r.created_at }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.company_id }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.kind }}</td>
+                    <td class="px-3 py-2 text-right">{{ r.gold_delta }}</td>
+                    <td class="px-3 py-2 text-right">{{ r.carbon_delta }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.material ? (r.material + ' ' + (r.material_delta ?? 0)) : '-' }}</td>
+                  </tr>
+                  <tr v-if="!ledger.length"><td colspan="6" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">AuditLog（审计）</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b">
+                  <th class="px-3 py-2">时间</th><th class="px-3 py-2">角色</th><th class="px-3 py-2">动作</th><th class="px-3 py-2">主体</th><th class="px-3 py-2">目标</th><th class="px-3 py-2">备注</th>
+                </tr></thead>
+                <tbody>
+                  <tr v-for="r in audits" :key="r.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 text-xs whitespace-nowrap">{{ r.created_at }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.actor_role }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.action }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.subject_company_id || '-' }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.target_company_id || '-' }}</td>
+                    <td class="px-3 py-2 text-xs">{{ r.message || '-' }}</td>
+                  </tr>
+                  <tr v-if="!audits.length"><td colspan="6" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const RecipeCenter = {
+        setup() {
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const rows = Vue.ref([]);
+          const code = Vue.ref("P001");
+          const name = Vue.ref("新产品");
+          const craft = Vue.ref("");
+          const itemsText = Vue.ref("R1=2\nR2=1");
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.get(mpath("/student/recipes"));
+              rows.value = r.data || [];
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          function parseItems() {
+            const items = [];
+            for (const line of (itemsText.value || "").split(/\r?\n/)) {
+              const t = line.trim();
+              if (!t) continue;
+              const [m, q] = t.split("=");
+              if (!m || !q) throw new Error("items 格式应为 每行 material=qty");
+              items.push({ material: m.trim(), qty: Number(q.trim()) });
+            }
+            return items;
+          }
+          async function save() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const items = parseItems();
+              await api.post(mpath("/student/recipe"), { product_code: code.value, product_name: name.value, craft: craft.value, items });
+              ok.value = "已保存配方";
+              await load();
+            } catch (e) {
+              msg.value = e?.message || errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { msg, ok, rows, code, name, craft, itemsText, load, save, UI };
+        },
+        template: `<div class="max-w-6xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">配方中心</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">产品编码</label>
+                <input v-model="code" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">产品名称</label>
+                <input v-model="name" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">工艺（文本）</label>
+                <input v-model="craft" class="${UI.input} mt-1" placeholder="例如：工艺A" />
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-slate-500">原料清单（每行 material=qty）</label>
+              <textarea v-model="itemsText" class="${UI.input} mt-1 font-mono text-xs" rows="4"></textarea>
+            </div>
+            <button type="button" @click="save" class="${UI.btnPrimary}">保存配方</button>
+          </div>
+          <div class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">已保存配方</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b"><th class="px-3 py-2">编码</th><th class="px-3 py-2">名称</th><th class="px-3 py-2">工艺</th><th class="px-3 py-2">原料</th><th class="px-3 py-2">更新时间</th></tr></thead>
+                <tbody>
+                  <tr v-for="r in rows" :key="r.product_code" class="border-b border-slate-100">
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.product_code }}</td>
+                    <td class="px-3 py-2">{{ r.product_name }}</td>
+                    <td class="px-3 py-2 text-xs">{{ r.craft }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ (r.items||[]).map(x=>x.material+'='+x.qty).join(', ') }}</td>
+                    <td class="px-3 py-2 text-xs">{{ r.updated_at }}</td>
+                  </tr>
+                  <tr v-if="!rows.length"><td colspan="5" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const ManufacturingCenter = {
+        setup() {
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const recipes = Vue.ref([]);
+          const productCode = Vue.ref("");
+          const qty = Vue.ref(1);
+          const idem = Vue.ref(uuid());
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.get(mpath("/student/recipes"));
+              recipes.value = r.data || [];
+              if (!productCode.value && recipes.value.length) productCode.value = recipes.value[0].product_code;
+            } catch {
+              recipes.value = [];
+            }
+          }
+          async function make() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/student/manufacture"), { product_code: productCode.value, qty: Number(qty.value), idempotency_key: idem.value });
+              ok.value = `制造成功：${r.data.product_code} x${r.data.qty}`;
+              idem.value = uuid();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { msg, ok, recipes, productCode, qty, idem, load, make, UI };
+        },
+        template: `<div class="max-w-4xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">产品制造中心</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="text-xs text-slate-500">需要设施：产品制造工厂（product_factory）。将按配方扣减原料并增加产品库存。</div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">产品编码</label>
+                <input v-model="productCode" class="${UI.input} mt-1 font-mono text-xs" placeholder="例如 P001" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">数量</label>
+                <input v-model.number="qty" type="number" min="1" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">幂等键</label>
+                <input v-model="idem" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+            </div>
+            <button type="button" @click="make" class="${UI.btnPrimary}" :disabled="!productCode || !qty || !idem">开始制造</button>
+          </div>
+          <div class="${UI.card} p-4 space-y-2" v-if="recipes.length">
+            <div class="font-medium text-sm">提示：当前已存在的配方</div>
+            <div class="text-xs text-slate-600" v-for="r in recipes" :key="r.product_code">
+              <span class="font-mono">{{ r.product_code }}</span> - {{ r.product_name }}：{{ (r.items||[]).map(x=>x.material+'×'+x.qty).join(' + ') }}
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const ProductSales = {
+        setup() {
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const listings = Vue.ref([]);
+          const myListings = Vue.ref([]);
+          const inv = Vue.ref({ raw: [], products: [] });
+          const productCode = Vue.ref("");
+          const unitPrice = Vue.ref(100);
+          const idem = Vue.ref(uuid());
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const [i, l] = await Promise.all([api.get(mpath("/student/inventory")), api.get(mpath("/student/product/listings"))]);
+              inv.value = i.data || { raw: [], products: [] };
+              listings.value = l.data || [];
+              if (!productCode.value && inv.value.products?.length) productCode.value = inv.value.products[0].material;
+              // my listings = filter by my company id
+              const me = (await api.get(mpath("/student/me"))).data;
+              myListings.value = listings.value.filter((x) => x.seller_company_id === me.company_id);
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function create() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/student/product/listing"), {
+                product_code: productCode.value,
+                unit_price_gold: Number(unitPrice.value),
+                idempotency_key: idem.value,
+              });
+              ok.value = `已上架：${r.data.id}`;
+              idem.value = uuid();
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function cancel(id) {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(mpath(`/student/product/listing/${id}/cancel`), { idempotency_key: uuid() });
+              ok.value = "已下架";
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          const sellListingId = Vue.ref("");
+          const sellQty = Vue.ref(1);
+          const sellIdem = Vue.ref(uuid());
+          async function sellConsumers() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/student/product/consumer-sell"), {
+                listing_id: sellListingId.value,
+                qty: Number(sellQty.value),
+                idempotency_key: sellIdem.value,
+              });
+              ok.value = `已卖给消费者：+${r.data.total_gold} 黄金`;
+              sellIdem.value = uuid();
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          const productOptions = Vue.computed(() => (inv.value?.products || []).map((x) => x.material));
+          const ratedMine = Vue.computed(() => (myListings.value || []).filter((x) => x.rating_score !== null && x.rating_score !== undefined));
+          Vue.watch(
+            ratedMine,
+            (rows) => {
+              if (!sellListingId.value && rows.length) sellListingId.value = rows[0].id;
+            },
+            { immediate: true }
+          );
+          return {
+            msg,
+            ok,
+            listings,
+            myListings,
+            inv,
+            productCode,
+            unitPrice,
+            idem,
+            sellListingId,
+            sellQty,
+            sellIdem,
+            load,
+            create,
+            cancel,
+            sellConsumers,
+            productOptions,
+            ratedMine,
+            UI,
+          };
+        },
+        template: `<div class="max-w-6xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">产品销售（上架/购买）</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="font-medium text-sm">上架（送评）</div>
+            <div class="text-xs text-slate-500">用途：展示给管理员评分。仅拥有 <span class="font-mono">department_store</span>（百货大楼）的公司可上架；规则：上架时库存直接减 1（不返还）。</div>
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">产品编码</label>
+                <select v-model="productCode" class="${UI.input} mt-1">
+                  <option v-for="x in productOptions" :key="x">{{ x }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">单价（黄金）</label>
+                <input v-model.number="unitPrice" type="number" min="1" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">幂等键</label>
+                <input v-model="idem" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+            </div>
+            <button type="button" @click="create" class="${UI.btnPrimary}" :disabled="!productCode || !unitPrice || !idem">上架（消耗 1 件）</button>
+          </div>
+
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="font-medium text-sm">Sell（卖给消费者）</div>
+            <div class="text-xs text-slate-500">规则：必须先评分才能 Sell。售价线性系数：<span class="font-mono">coef = score/100</span>，最终售价 = 标价 × coef（四舍五入）。</div>
+            <div class="grid grid-cols-1 sm:grid-cols-4 gap-3">
+              <div class="sm:col-span-2">
+                <label class="text-xs text-slate-500">选择“已评分”的上架条目</label>
+                <select v-model="sellListingId" class="${UI.input} mt-1 font-mono text-xs">
+                  <option v-for="x in ratedMine" :key="x.id" :value="x.id">
+                    {{ x.id.slice(0,8) }} · {{ x.product_code }} · score={{ x.rating_score }} · price={{ x.unit_price_gold }}
+                  </option>
+                </select>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">数量</label>
+                <input v-model.number="sellQty" type="number" min="1" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">幂等键</label>
+                <input v-model="sellIdem" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+            </div>
+            <button type="button" @click="sellConsumers" class="${UI.btnPrimary}" :disabled="!sellListingId || !sellIdem || !sellQty">Sell</button>
+          </div>
+
+          <div class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">上架列表（供评分查看）</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b">
+                  <th class="px-3 py-2">时间</th><th class="px-3 py-2">卖家</th><th class="px-3 py-2">产品</th>
+                  <th class="px-3 py-2 text-right">预留量</th><th class="px-3 py-2 text-right">标价</th><th class="px-3 py-2">评分</th><th class="px-3 py-2"></th>
+                </tr></thead>
+                <tbody>
+                  <tr v-for="x in listings" :key="x.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 text-xs whitespace-nowrap">{{ x.created_at }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ x.seller_company_id }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ x.product_code }}</td>
+                    <td class="px-3 py-2 text-right">{{ x.qty }}</td>
+                    <td class="px-3 py-2 text-right">{{ x.unit_price_gold }}</td>
+                    <td class="px-3 py-2 text-xs">{{ x.rating_score ?? '-' }} <span class="text-slate-500">{{ x.rating_comment ? ('· ' + x.rating_comment) : '' }}</span></td>
+                    <td class="px-3 py-2 text-right">
+                      <span class="text-slate-400 text-xs">—</span>
+                    </td>
+                  </tr>
+                  <tr v-if="!listings.length"><td colspan="7" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div class="${UI.card} overflow-hidden" v-if="myListings.length">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">我的上架</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b"><th class="px-3 py-2">产品</th><th class="px-3 py-2 text-right">余量</th><th class="px-3 py-2 text-right">单价</th><th class="px-3 py-2"></th></tr></thead>
+                <tbody>
+                  <tr v-for="x in myListings" :key="x.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 font-mono text-xs">{{ x.product_code }}</td>
+                    <td class="px-3 py-2 text-right">{{ x.qty }}</td>
+                    <td class="px-3 py-2 text-right">{{ x.unit_price_gold }}</td>
+                    <td class="px-3 py-2 text-right"><button type="button" class="${UI.btnGhost}" @click="cancel(x.id)">下架</button></td>
+                  </tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const AdminProductRating = {
+        setup() {
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const listings = Vue.ref([]);
+          const listingId = Vue.ref("");
+          const score = Vue.ref(80);
+          const comment = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.get(mpath("/student/product/listings"));
+              listings.value = r.data || [];
+              if (!listingId.value && listings.value.length) listingId.value = listings.value[0].id;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function rate() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(mpath(`/admin/product/listing/${listingId.value}/rate`), { score: Number(score.value), comment: comment.value });
+              ok.value = "已评分";
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { msg, ok, listings, listingId, score, comment, load, rate, UI };
+        },
+        template: `<div class="max-w-4xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">管理员：产品评分</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div>
+              <label class="text-xs text-slate-500">选择上架条目</label>
+              <select v-model="listingId" class="${UI.input} mt-1 font-mono text-xs">
+                <option v-for="x in listings" :key="x.id" :value="x.id">{{ x.id.slice(0,8) }} · {{ x.product_code }} · seller={{ x.seller_company_id.slice(0,8) }}</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">分数（0-100）</label>
+                <input v-model.number="score" type="number" min="0" max="100" class="${UI.input} mt-1" />
+              </div>
+              <div class="sm:col-span-2">
+                <label class="text-xs text-slate-500">评语（可空）</label>
+                <input v-model="comment" class="${UI.input} mt-1" />
+              </div>
+            </div>
+            <button type="button" @click="rate" class="${UI.btnPrimary}" :disabled="!listingId">提交评分</button>
+          </div>
+        </div>`,
+      };
+
+      const Inventory = {
+        setup() {
+          const rawRows = Vue.ref([]);
+          const productRows = Vue.ref([]);
+          const msg = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            try {
+              const r = await api.get(mpath("/student/inventory"));
+              rawRows.value = r.data?.raw || [];
+              productRows.value = r.data?.products || [];
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { rawRows, productRows, msg, load, UI };
+        },
+        template: `<div class="max-w-5xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">团队仓库</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <div class="grid grid-cols-1 lg:grid-cols-2 gap-3">
+            <div class="${UI.card} overflow-hidden">
+              <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">原料仓库</div>
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left bg-white/60 border-b text-slate-600"><th class="px-3 py-2">原料</th><th class="px-3 py-2 text-right">库存</th></tr></thead>
+                <tbody>
+                  <tr v-for="r in rawRows" :key="r.material" class="border-b border-slate-100">
+                    <td class="px-3 py-2">{{ r.material }}</td>
+                    <td class="px-3 py-2 text-right">{{ r.qty }}</td>
+                  </tr>
+                  <tr v-if="!rawRows.length"><td colspan="2" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+            <div class="${UI.card} overflow-hidden">
+              <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">产品仓库</div>
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left bg-white/60 border-b text-slate-600"><th class="px-3 py-2">产品</th><th class="px-3 py-2 text-right">库存</th></tr></thead>
+                <tbody>
+                  <tr v-for="r in productRows" :key="r.material" class="border-b border-slate-100">
+                    <td class="px-3 py-2 font-mono text-xs">{{ r.material }}</td>
+                    <td class="px-3 py-2 text-right">{{ r.qty }}</td>
+                  </tr>
+                  <tr v-if="!productRows.length"><td colspan="2" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const Transfer = {
+        setup() {
+          const companies = Vue.ref([]);
+          const toCompanyId = Vue.ref("");
+          const amount = Vue.ref(10);
+          const asset = Vue.ref("gold"); // gold | carbon
+          const idem = Vue.ref(uuid());
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.get(mpath("/student/companies"));
+              companies.value = r.data || [];
+              if (!toCompanyId.value && companies.value.length) toCompanyId.value = companies.value[0].id;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function submit() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const url = asset.value === "carbon" ? "/student/carbon/transfer" : "/student/gold/transfer";
+              const r = await api.post(mpath(url), { to_company_id: toCompanyId.value, amount: Number(amount.value), idempotency_key: idem.value });
+              ok.value = `转账成功：${r.data.amount}`;
+              idem.value = uuid();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return { companies, toCompanyId, amount, asset, idem, msg, ok, load, submit, UI };
+        },
+        template: `<div class="max-w-3xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">公司转账（黄金/碳排）</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新公司列表</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <div class="${UI.card} p-4 space-y-3">
+            <div>
+              <label class="text-xs text-slate-500">资产类型</label>
+              <select v-model="asset" class="${UI.input} mt-1">
+                <option value="gold">黄金</option>
+                <option value="carbon">碳排放指标</option>
+              </select>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">收款公司</label>
+                <select v-model="toCompanyId" class="${UI.input} mt-1">
+                  <option v-for="c in companies" :key="c.id" :value="c.id">{{ c.name }}</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">金额</label>
+                <input v-model.number="amount" type="number" min="1" class="${UI.input} mt-1" />
+              </div>
+            </div>
+            <div>
+              <label class="text-xs text-slate-500">幂等键</label>
+              <input v-model="idem" class="${UI.input} mt-1 font-mono text-xs" />
+            </div>
+            <button type="button" @click="submit" class="${UI.btnPrimary}" :disabled="!toCompanyId">确认转账</button>
+            <p class="text-sm text-emerald-700">{{ ok }}</p>
+          </div>
+        </div>`,
+      };
+
+      const Trade = {
+        setup() {
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const companies = Vue.ref([]);
+          const me = Vue.ref(null);
+          const inv = Vue.ref({ raw: [], products: [] });
+          const inbox = Vue.ref([]);
+          const outbox = Vue.ref([]);
+          const toCompanyId = Vue.ref("");
+          const material = Vue.ref("R1");
+          const qty = Vue.ref(1);
+          const unitPrice = Vue.ref(20);
+          const idem = Vue.ref(uuid());
+
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const [m, c, i, ib, ob] = await Promise.all([
+                api.get(mpath("/student/me")),
+                api.get(mpath("/student/companies")),
+                api.get(mpath("/student/inventory")),
+                api.get(mpath("/trade/requests/inbox")),
+                api.get(mpath("/trade/requests/outbox")),
+              ]);
+              me.value = m.data;
+              companies.value = c.data || [];
+              inv.value = i.data || { raw: [], products: [] };
+              inbox.value = ib.data || [];
+              outbox.value = ob.data || [];
+              if (!toCompanyId.value && companies.value.length) {
+                const firstOther = companies.value.find((x) => x.id !== me.value?.company_id);
+                if (firstOther) toCompanyId.value = firstOther.id;
+              }
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+
+          async function create() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/trade/request"), {
+                to_company_id: toCompanyId.value,
+                material: material.value,
+                qty: Number(qty.value),
+                unit_price: Number(unitPrice.value),
+                idempotency_key: idem.value,
+              });
+              ok.value = `已发起请求：${r.data.id}`;
+              idem.value = uuid();
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+
+          async function decide(id, decision) {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(mpath(`/trade/request/${id}/decide`), { decision, idempotency_key: uuid() });
+              ok.value = decision === "accept" ? "已同意并结算" : "已拒绝";
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+
+          const allInv = Vue.computed(() => [...(inv.value?.raw || []), ...(inv.value?.products || [])]);
+          const invMap = Vue.computed(() => Object.fromEntries(allInv.value.map((x) => [x.material, x.qty])));
+          const estTotal = Vue.computed(() => (Number(qty.value) || 0) * (Number(unitPrice.value) || 0));
+
+          Vue.onMounted(load);
+          const tradeType = Vue.ref("raw"); // raw | product
+          const rawOptions = ["R1", "R2", "R3"];
+          const productOptions = Vue.computed(() => (inv.value?.products || []).map((x) => x.material));
+          Vue.watch(
+            tradeType,
+            (t) => {
+              if (t === "raw") material.value = "R1";
+              else material.value = productOptions.value[0] || "P001";
+            },
+            { immediate: true }
+          );
+          return {
+            msg,
+            ok,
+            companies,
+            me,
+            inv,
+            inbox,
+            outbox,
+            toCompanyId,
+            tradeType,
+            rawOptions,
+            productOptions,
+            material,
+            qty,
+            unitPrice,
+            idem,
+            load,
+            create,
+            decide,
+            invMap,
+            estTotal,
+            UI,
+          };
+        },
+        template: `<div class="max-w-6xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">公司交易（点对点）</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+
+          <div class="grid grid-cols-1 lg:grid-cols-3 gap-4">
+            <div class="${UI.card} p-4 space-y-3 lg:col-span-1">
+              <div class="font-medium text-sm text-slate-800">发起交易请求</div>
+              <div class="text-xs text-slate-500">含义：我公司向对方公司卖出原料，对方同意后用黄金购买并立即结算。</div>
+              <div>
+                <label class="text-xs text-slate-500">对方公司</label>
+                <select v-model="toCompanyId" class="${UI.input} mt-1">
+                  <option v-for="c in companies" :key="c.id" :value="c.id" :disabled="c.id===me?.company_id">{{ c.name }}</option>
+                </select>
+              </div>
+              <div class="grid grid-cols-3 gap-2">
+                <div>
+                  <label class="text-xs text-slate-500">交易类型</label>
+                  <select v-model="tradeType" class="${UI.input} mt-1">
+                    <option value="raw">原料</option>
+                    <option value="product">产品</option>
+                  </select>
+                  <label class="text-xs text-slate-500 mt-2 block">物品</label>
+                  <select v-model="material" class="${UI.input} mt-1">
+                    <option v-for="x in (tradeType==='raw' ? rawOptions : productOptions)" :key="x">{{ x }}</option>
+                  </select>
+                  <div class="text-[11px] text-slate-500 mt-1">我方库存：{{ invMap[material] ?? 0 }}</div>
+                </div>
+                <div>
+                  <label class="text-xs text-slate-500">数量</label>
+                  <input v-model.number="qty" type="number" min="1" class="${UI.input} mt-1" />
+                </div>
+                <div>
+                  <label class="text-xs text-slate-500">单价(黄金)</label>
+                  <input v-model.number="unitPrice" type="number" min="1" class="${UI.input} mt-1" />
+                </div>
+              </div>
+              <div class="text-xs text-slate-500">预计总价：<span class="font-semibold text-purple-700">{{ estTotal }}</span></div>
+              <div>
+                <label class="text-xs text-slate-500">幂等键</label>
+                <input v-model="idem" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+              <button type="button" @click="create" class="${UI.btnPrimary}" :disabled="!toCompanyId">发起请求</button>
+            </div>
+
+            <div class="${UI.card} overflow-hidden lg:col-span-2">
+              <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">收件箱（我需要同意/拒绝）</div>
+              <div class="overflow-x-auto">
+                <table class="min-w-full text-sm">
+                  <thead><tr class="text-left text-slate-500 border-b">
+                    <th class="px-3 py-2">时间</th><th class="px-3 py-2">来自公司</th><th class="px-3 py-2">原料</th><th class="px-3 py-2 text-right">数量</th><th class="px-3 py-2 text-right">单价</th><th class="px-3 py-2 text-right">总价</th><th class="px-3 py-2">状态</th><th class="px-3 py-2"></th>
+                  </tr></thead>
+                  <tbody>
+                    <tr v-for="t in inbox" :key="t.id" class="border-b border-slate-100">
+                      <td class="px-3 py-2 text-xs whitespace-nowrap">{{ t.created_at }}</td>
+                      <td class="px-3 py-2 font-mono text-xs">{{ t.from_company_id }}</td>
+                      <td class="px-3 py-2">{{ t.material }}</td>
+                      <td class="px-3 py-2 text-right">{{ t.qty }}</td>
+                      <td class="px-3 py-2 text-right">{{ t.unit_price_gold }}</td>
+                      <td class="px-3 py-2 text-right">{{ t.qty * t.unit_price_gold }}</td>
+                      <td class="px-3 py-2 font-mono text-xs">{{ t.status }}</td>
+                      <td class="px-3 py-2 space-x-2">
+                        <button v-if="t.status==='pending'" type="button" @click="decide(t.id,'accept')" class="text-emerald-700 hover:underline">同意</button>
+                        <button v-if="t.status==='pending'" type="button" @click="decide(t.id,'reject')" class="text-rose-700 hover:underline">拒绝</button>
+                      </td>
+                    </tr>
+                    <tr v-if="!inbox.length"><td colspan="8" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                  </tbody>
+                </table>
+              </div>
+              <div class="px-4 py-2 border-t text-sm font-medium bg-white/60">发件箱（我发起的请求）</div>
+              <div class="overflow-x-auto">
+                <table class="min-w-full text-sm">
+                  <thead><tr class="text-left text-slate-500 border-b">
+                    <th class="px-3 py-2">时间</th><th class="px-3 py-2">对方公司</th><th class="px-3 py-2">原料</th><th class="px-3 py-2 text-right">数量</th><th class="px-3 py-2 text-right">单价</th><th class="px-3 py-2">状态</th>
+                  </tr></thead>
+                  <tbody>
+                    <tr v-for="t in outbox" :key="t.id" class="border-b border-slate-100">
+                      <td class="px-3 py-2 text-xs whitespace-nowrap">{{ t.created_at }}</td>
+                      <td class="px-3 py-2 font-mono text-xs">{{ t.to_company_id }}</td>
+                      <td class="px-3 py-2">{{ t.material }}</td>
+                      <td class="px-3 py-2 text-right">{{ t.qty }}</td>
+                      <td class="px-3 py-2 text-right">{{ t.unit_price_gold }}</td>
+                      <td class="px-3 py-2 font-mono text-xs">{{ t.status }}</td>
+                    </tr>
+                    <tr v-if="!outbox.length"><td colspan="6" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const Admin = {
+        setup() {
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const cname = Vue.ref("");
+          const joinPwd = Vue.ref("");
+          const grantCompanyId = Vue.ref("");
+          const grantGold = Vue.ref(100);
+          const grantCarbon = Vue.ref(100);
+          const grantMaterial = Vue.ref("R1");
+          const grantQty = Vue.ref(10);
+          const initialGold = Vue.ref(0);
+          const initialCarbon = Vue.ref(0);
+          const pR1 = Vue.ref(10);
+          const pR2 = Vue.ref(20);
+          const pR3 = Vue.ref(30);
+          const issueIdem = Vue.ref(uuid());
+          async function loadSettings() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.get(mpath("/admin/settings"));
+              initialGold.value = r.data.initial_gold ?? 0;
+              initialCarbon.value = r.data.initial_carbon ?? 0;
+              pR1.value = r.data.material_prices?.R1 ?? 10;
+              pR2.value = r.data.material_prices?.R2 ?? 20;
+              pR3.value = r.data.material_prices?.R3 ?? 30;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function importCompany() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/admin/companies"), { name: cname.value, join_password: joinPwd.value });
+              ok.value = `已导入公司：${r.data.name}（${r.data.id}）`;
+              grantCompanyId.value = r.data.id;
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function grantGoldFn() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(mpath(`/admin/companies/${grantCompanyId.value}/grant-gold`), { amount: Number(grantGold.value), idempotency_key: uuid() });
+              ok.value = "发放黄金成功";
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function grantCarbonFn() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(mpath(`/admin/companies/${grantCompanyId.value}/grant-carbon`), { amount: Number(grantCarbon.value), idempotency_key: uuid() });
+              ok.value = "发放碳排放指标成功";
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function grantMaterialFn() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(mpath(`/admin/companies/${grantCompanyId.value}/grant-material`), {
+                material: grantMaterial.value,
+                qty: Number(grantQty.value),
+                idempotency_key: uuid(),
+              });
+              ok.value = "发放原料成功";
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function saveSettings() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              await api.post(mpath("/admin/settings"), {
+                initial_gold: Number(initialGold.value),
+                initial_carbon: Number(initialCarbon.value),
+                material_prices: { R1: Number(pR1.value), R2: Number(pR2.value), R3: Number(pR3.value) },
+              });
+              ok.value = "赛场配置已保存";
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function issueInitial() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath("/admin/issue-initial"), { idempotency_key: issueIdem.value });
+              ok.value = `已一键发放：issued=${r.data.issued} skipped=${r.data.skipped}`;
+              issueIdem.value = uuid();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function exportBalanceSheet() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const mk = matchKey();
+              const base = (api.defaults.baseURL || "").replace(/\/$/, "");
+              const url = `${base}${mpath("/admin/export/balance-sheet.csv")}`;
+              const r = await fetch(url, { headers: { Authorization: `Bearer ${token()}` } });
+              if (!r.ok) {
+                let detail = r.statusText;
+                try {
+                  const j = await r.json();
+                  if (typeof j?.detail === "string") detail = j.detail;
+                } catch {
+                  /* ignore */
+                }
+                throw new Error(detail);
+              }
+              const blob = await r.blob();
+              const a = document.createElement("a");
+              a.href = URL.createObjectURL(blob);
+              a.download = `balance-sheet-${mk || "match"}.csv`;
+              a.click();
+              URL.revokeObjectURL(a.href);
+              ok.value = "已下载资产负债表 CSV（UTF-8 BOM，可用 Excel 打开）";
+            } catch (e) {
+              msg.value = e?.message || String(e);
+            }
+          }
+          Vue.onMounted(loadSettings);
+          return {
+            msg,
+            ok,
+            cname,
+            joinPwd,
+            grantCompanyId,
+            grantGold,
+            grantCarbon,
+            grantMaterial,
+            grantQty,
+            initialGold,
+            initialCarbon,
+            pR1,
+            pR2,
+            pR3,
+            issueIdem,
+            loadSettings,
+            saveSettings,
+            issueInitial,
+            exportBalanceSheet,
+            importCompany,
+            grantGoldFn,
+            grantCarbonFn,
+            grantMaterialFn,
+            UI,
+          };
+        },
+        template: `<div class="max-w-4xl space-y-4">
+          <h1 class="text-xl font-semibold">管理员</h1>
+          <p class="text-sm text-slate-600">需要系统管理员或赛场管理员权限。可设置赛场初始黄金/碳排与原料基准价，并一键发放到所有公司（幂等）。</p>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="font-medium text-sm flex items-center gap-2">
+              赛场配置
+              <button type="button" @click="loadSettings" class="${UI.btnGhost} ml-auto">刷新</button>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">初始黄金（每公司）</label>
+                <input v-model.number="initialGold" type="number" min="0" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">初始碳排（每公司）</label>
+                <input v-model.number="initialCarbon" type="number" min="0" class="${UI.input} mt-1" />
+              </div>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">R1 基准价</label>
+                <input v-model.number="pR1" type="number" min="0" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">R2 基准价</label>
+                <input v-model.number="pR2" type="number" min="0" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">R3 基准价</label>
+                <input v-model.number="pR3" type="number" min="0" class="${UI.input} mt-1" />
+              </div>
+            </div>
+            <div class="flex gap-2 flex-wrap items-center">
+              <button type="button" @click="saveSettings" class="${UI.btnPrimary}">保存配置</button>
+              <button type="button" @click="exportBalanceSheet" class="${UI.btnGhost}">导出资产负债表 CSV</button>
+              <div class="ml-auto flex items-center gap-2">
+                <input v-model="issueIdem" class="${UI.input} font-mono text-xs w-56" />
+                <button type="button" @click="issueInitial" class="${UI.btnPrimary}">一键发放到所有公司</button>
+              </div>
+            </div>
+            <div class="text-xs text-slate-500">提示：一键发放使用幂等键避免重复发放；同一个幂等键重复点击不会重复增加余额。导出列为：公司名、黄金、设施价值、原料价值、股权价值、负债价值、总资产（原料按赛场基准价半价；设施按全价 gold_cost×数量；股权/负债暂为 0，后续可接录入）。</div>
+          </div>
+
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="font-medium text-sm">导入公司</div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">公司名</label>
+                <input v-model="cname" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">加入密码</label>
+                <input v-model="joinPwd" type="password" class="${UI.input} mt-1" />
+              </div>
+            </div>
+            <button type="button" @click="importCompany" class="${UI.btnPrimary}" :disabled="!cname || !joinPwd">导入</button>
+          </div>
+
+          <div class="${UI.card} p-4 space-y-3">
+            <div class="font-medium text-sm">发放资产</div>
+            <div>
+              <label class="text-xs text-slate-500">公司 ID</label>
+              <input v-model="grantCompanyId" class="${UI.input} mt-1 font-mono text-xs" placeholder="粘贴公司ID" />
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">发放黄金</label>
+                <div class="flex gap-2 mt-1">
+                  <input v-model.number="grantGold" type="number" min="1" class="${UI.input}" />
+                  <button type="button" @click="grantGoldFn" class="${UI.btnPrimary}" :disabled="!grantCompanyId">发放</button>
+                </div>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">发放碳排放指标</label>
+                <div class="flex gap-2 mt-1">
+                  <input v-model.number="grantCarbon" type="number" min="1" class="${UI.input}" />
+                  <button type="button" @click="grantCarbonFn" class="${UI.btnPrimary}" :disabled="!grantCompanyId">发放</button>
+                </div>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">发放原料（临时）</label>
+                <div class="flex gap-2 mt-1">
+                  <select v-model="grantMaterial" class="${UI.input} w-28"><option>R1</option><option>R2</option><option>R3</option></select>
+                  <input v-model.number="grantQty" type="number" min="1" class="${UI.input}" />
+                  <button type="button" @click="grantMaterialFn" class="${UI.btnPrimary}" :disabled="!grantCompanyId">发放</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const LegacyCompany = {
         setup() {
           const name = Vue.ref("");
           const msg = Vue.ref("");
@@ -186,7 +2014,7 @@
         </div>`,
       };
 
-      const Wallet = {
+      const LegacyWallet = {
         setup() {
           const bal = Vue.ref(null);
           const ledger = Vue.ref([]);
@@ -234,7 +2062,7 @@
         </div>`,
       };
 
-      const Transfer = {
+      const LegacyTransfer = {
         setup() {
           const companies = Vue.ref([]);
           const meBal = Vue.ref(null);
@@ -330,7 +2158,7 @@
         </div>`,
       };
 
-      const Inventory = {
+      const LegacyInventory = {
         setup() {
           const rows = Vue.ref([]);
           const msg = Vue.ref("");
@@ -361,7 +2189,7 @@
         </div>`,
       };
 
-      const Mine = {
+      const LegacyMine = {
         setup() {
           const material = Vue.ref("R1");
           const qty = Vue.ref(1);
@@ -476,7 +2304,7 @@
         </div>`,
       };
 
-      const Market = {
+      const LegacyMarket = {
         setup() {
           const listings = Vue.ref([]);
           const filter = Vue.ref("");
@@ -588,7 +2416,7 @@
         </div>`,
       };
 
-      const MyTrades = {
+      const LegacyMyTrades = {
         setup() {
           const listings = Vue.ref([]);
           const trades = Vue.ref([]);
@@ -641,7 +2469,7 @@
         </div>`,
       };
 
-      const Admin = {
+      const LegacyAdmin = {
         setup() {
           const cname = Vue.ref("系统公司A");
           const cid = Vue.ref("");
@@ -695,27 +2523,45 @@
         </div>`,
       };
 
-      async function requireAuth() {
+      async function legacyRequireAuth() {
         if (!token()) return "/";
         return true;
       }
 
+      async function requireAuth() {
+        if (!token()) return "/";
+        return true;
+      }
+      async function requireMatch() {
+        if (!token()) return "/";
+        if (!matchKey()) return "/match";
+        return true;
+      }
+
       const routes = [
-        { path: "/", component: Login, meta: { guest: true } },
+        { path: "/", component: Auth, meta: { guest: true } },
+        { path: "/match", component: MatchSelect, beforeEnter: requireAuth },
         {
           path: "/app",
           component: Layout,
-          beforeEnter: requireAuth,
+          beforeEnter: requireMatch,
           children: [
             { path: "", redirect: "/app/overview" },
             { path: "overview", component: Overview },
-            { path: "company", component: Company },
+            { path: "company", component: CompanyJoin },
             { path: "wallet", component: Wallet },
-            { path: "transfer", component: Transfer },
             { path: "inventory", component: Inventory },
-            { path: "mine", component: Mine },
-            { path: "market", component: Market },
-            { path: "my-trades", component: MyTrades },
+            { path: "transfer", component: Transfer },
+            { path: "carbon", redirect: "/app/transfer" },
+            { path: "facilities", component: FacilityCenter },
+            { path: "mining", component: Mining },
+            { path: "trade", component: Trade },
+            { path: "contracts", component: Contracts },
+            { path: "audit", component: AdminAudit },
+            { path: "recipes", component: RecipeCenter },
+            { path: "manufacture", component: ManufacturingCenter },
+            { path: "sales", component: ProductSales },
+            { path: "rating", component: AdminProductRating },
             { path: "admin", component: Admin },
           ],
         },
