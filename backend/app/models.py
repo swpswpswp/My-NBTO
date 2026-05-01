@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from typing import Optional
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import Boolean, DateTime, ForeignKey, Integer, Numeric, String, UniqueConstraint
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 
@@ -121,7 +121,7 @@ class Inventory(Base):
     match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
     company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     material: Mapped[str] = mapped_column(String(16))
-    qty: Mapped[int] = mapped_column(Integer, default=0)
+    qty: Mapped[float] = mapped_column(Numeric(12, 2, asdecimal=True), default=0)
 
 
 class LedgerEntry(Base):
@@ -135,7 +135,7 @@ class LedgerEntry(Base):
     gold_delta: Mapped[int] = mapped_column(Integer, default=0)
     carbon_delta: Mapped[int] = mapped_column(Integer, default=0)
     material: Mapped[Optional[str]] = mapped_column(String(16), nullable=True)
-    material_delta: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    material_delta: Mapped[Optional[float]] = mapped_column(Numeric(12, 2, asdecimal=True), nullable=True)
     counterparty_company_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     reference_type: Mapped[str] = mapped_column(String(64))
     reference_id: Mapped[str] = mapped_column(String(36))
@@ -169,7 +169,7 @@ class TradeRequest(Base):
     from_company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     to_company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
     material: Mapped[str] = mapped_column(String(16))
-    qty: Mapped[int] = mapped_column(Integer)
+    qty: Mapped[float] = mapped_column(Numeric(12, 2, asdecimal=True))
     unit_price_gold: Mapped[int] = mapped_column(Integer)
     status: Mapped[str] = mapped_column(String(16))  # pending/accepted/rejected/settled
     idempotency_key: Mapped[str] = mapped_column(String(128))
@@ -253,7 +253,7 @@ class RecipeItem(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     recipe_id: Mapped[str] = mapped_column(String(36), ForeignKey("recipes.id", ondelete="CASCADE"), index=True)
     material: Mapped[str] = mapped_column(String(64))  # 原料 code（可扩展）
-    qty: Mapped[int] = mapped_column(Integer)
+    qty: Mapped[float] = mapped_column(Numeric(12, 2, asdecimal=True))
 
 
 class ProductListing(Base):
@@ -275,3 +275,44 @@ class ProductListing(Base):
     rating_comment: Mapped[Optional[str]] = mapped_column(String(256), nullable=True)
     rated_by_user_id: Mapped[Optional[str]] = mapped_column(String(36), nullable=True)
     rated_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RushOrder(Base):
+    __tablename__ = "rush_orders"
+    __table_args__ = (UniqueConstraint("match_id", "idempotency_key", name="uq_rush_order_idem"),)
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    created_by_user_id: Mapped[str] = mapped_column(String(36))
+    product_code: Mapped[str] = mapped_column(String(16))
+    craft_code: Mapped[str] = mapped_column(String(64))
+    recipe_items_json: Mapped[str] = mapped_column(String(2000))  # 结构化原料清单（json string）
+    recipe_hash: Mapped[str] = mapped_column(String(64))
+    recipe_text: Mapped[str] = mapped_column(String(512))  # 说明（可选，展示用）
+    demand_qty: Mapped[int] = mapped_column(Integer)
+    unit_price_gold: Mapped[int] = mapped_column(Integer)
+    settlement_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    status: Mapped[str] = mapped_column(String(16))  # open/settled/cancelled
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    settled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)
+
+
+class RushOrderSubmission(Base):
+    __tablename__ = "rush_order_submissions"
+    __table_args__ = (
+        UniqueConstraint("match_id", "rush_order_id", "company_id", "idempotency_key", name="uq_rush_submit_idem"),
+    )
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
+    match_id: Mapped[str] = mapped_column(String(36), ForeignKey("matches.id", ondelete="CASCADE"), index=True)
+    rush_order_id: Mapped[str] = mapped_column(String(36), ForeignKey("rush_orders.id", ondelete="CASCADE"), index=True)
+    company_id: Mapped[str] = mapped_column(String(36), ForeignKey("companies.id", ondelete="CASCADE"), index=True)
+    product_code: Mapped[str] = mapped_column(String(16))
+    recipe_hash: Mapped[str] = mapped_column(String(64))
+    qty_submitted: Mapped[int] = mapped_column(Integer)
+    submitted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    idempotency_key: Mapped[str] = mapped_column(String(128))
+    status: Mapped[str] = mapped_column(String(16))  # submitted/accepted/rejected
+    qty_accepted: Mapped[int] = mapped_column(Integer, default=0)
+    settled_at: Mapped[Optional[datetime]] = mapped_column(DateTime(timezone=True), nullable=True)

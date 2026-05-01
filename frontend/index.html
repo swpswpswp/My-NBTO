@@ -65,6 +65,26 @@
       };
 
       const Session = Vue.reactive({ me: null });
+      const Craft = Vue.reactive({ types: [], loaded: false });
+      async function ensureCraftTypes() {
+        if (Craft.loaded) return;
+        try {
+          const r = await api.get("/v2/craft-types");
+          Craft.types = r.data || [];
+          Craft.loaded = true;
+        } catch {
+          // fallback (keep UI usable even if backend not updated)
+          Craft.types = [
+            { code: "CRAFT_A", name: "工艺A" },
+            { code: "CRAFT_B", name: "工艺B" },
+          ];
+          Craft.loaded = true;
+        }
+      }
+      function craftName(code) {
+        const x = (Craft.types || []).find((t) => t.code === code);
+        return x ? x.name : code || "-";
+      }
 
       const Auth = {
         setup() {
@@ -236,6 +256,7 @@
                 <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/recipes">配方中心</RouterLink>
                 <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/manufacture">产品制造</RouterLink>
                 <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/sales">产品销售</RouterLink>
+                <RouterLink class="block px-3 py-2 rounded-lg hover:bg-white/70" active-class="bg-purple-50 text-purple-800 border border-purple-100 font-medium" to="/app/rush">抢单</RouterLink>
               </div>
 
               <button type="button" @click="toggle('admin')" class="w-full flex items-center gap-2 px-3 py-2 rounded-lg hover:bg-white/70 border border-transparent">
@@ -981,12 +1002,13 @@
           const rows = Vue.ref([]);
           const code = Vue.ref("P001");
           const name = Vue.ref("新产品");
-          const craft = Vue.ref("");
+          const craft = Vue.ref("CRAFT_A");
           const itemsText = Vue.ref("R1=2\nR2=1");
           async function load() {
             msg.value = "";
             ok.value = "";
             try {
+              await ensureCraftTypes();
               const r = await api.get(mpath("/student/recipes"));
               rows.value = r.data || [];
             } catch (e) {
@@ -1017,7 +1039,7 @@
             }
           }
           Vue.onMounted(load);
-          return { msg, ok, rows, code, name, craft, itemsText, load, save, UI };
+          return { msg, ok, rows, code, name, craft, itemsText, load, save, UI, Craft, craftName };
         },
         template: `<div class="max-w-6xl space-y-4">
           <div class="flex items-center gap-3">
@@ -1037,8 +1059,10 @@
                 <input v-model="name" class="${UI.input} mt-1" />
               </div>
               <div>
-                <label class="text-xs text-slate-500">工艺（文本）</label>
-                <input v-model="craft" class="${UI.input} mt-1" placeholder="例如：工艺A" />
+                <label class="text-xs text-slate-500">工艺（下拉）</label>
+                <select v-model="craft" class="${UI.input} mt-1">
+                  <option v-for="c in (Craft.types||[])" :key="c.code" :value="c.code">{{ c.name }}（{{ c.code }}）</option>
+                </select>
               </div>
             </div>
             <div>
@@ -1056,7 +1080,7 @@
                   <tr v-for="r in rows" :key="r.product_code" class="border-b border-slate-100">
                     <td class="px-3 py-2 font-mono text-xs">{{ r.product_code }}</td>
                     <td class="px-3 py-2">{{ r.product_name }}</td>
-                    <td class="px-3 py-2 text-xs">{{ r.craft }}</td>
+                    <td class="px-3 py-2 text-xs">{{ craftName(r.craft) }}</td>
                     <td class="px-3 py-2 font-mono text-xs">{{ (r.items||[]).map(x=>x.material+'='+x.qty).join(', ') }}</td>
                     <td class="px-3 py-2 text-xs">{{ r.updated_at }}</td>
                   </tr>
@@ -1130,6 +1154,274 @@
             <div class="font-medium text-sm">提示：当前已存在的配方</div>
             <div class="text-xs text-slate-600" v-for="r in recipes" :key="r.product_code">
               <span class="font-mono">{{ r.product_code }}</span> - {{ r.product_name }}：{{ (r.items||[]).map(x=>x.material+'×'+x.qty).join(' + ') }}
+            </div>
+          </div>
+        </div>`,
+      };
+
+      const RushOrders = {
+        setup() {
+          const msg = Vue.ref("");
+          const ok = Vue.ref("");
+          const isAdmin = Vue.computed(() => Session.me?.role === "system_admin");
+          const studentOrders = Vue.ref([]);
+          const adminOrders = Vue.ref([]);
+          const myRecipes = Vue.ref([]);
+          const submitQty = Vue.ref(1);
+          const submitIdem = Vue.ref(uuid());
+          const submitProductCode = Vue.ref("");
+          const publishProduct = Vue.ref("P001");
+          const publishCraft = Vue.ref("CRAFT_A");
+          const publishItemsText = Vue.ref("R1=2\nR2=1");
+          const publishDesc = Vue.ref("");
+          const publishDemand = Vue.ref(10);
+          const publishPrice = Vue.ref(100);
+          const publishSettleAt = Vue.ref(new Date(Date.now() + 10 * 60 * 1000).toISOString());
+          const publishIdem = Vue.ref(uuid());
+          async function load() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              Session.me = (await api.get(mpath("/student/me"))).data;
+            } catch {
+              /* ignore */
+            }
+            try {
+              const r = await api.get(mpath("/student/rush/orders"));
+              studentOrders.value = r.data || [];
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+            try {
+              await ensureCraftTypes();
+              const rr = await api.get(mpath("/student/recipes"));
+              myRecipes.value = rr.data || [];
+              if (!submitProductCode.value && myRecipes.value.length) submitProductCode.value = myRecipes.value[0].product_code;
+            } catch {
+              myRecipes.value = [];
+            }
+            if (isAdmin.value) {
+              try {
+                const r2 = await api.get(mpath("/admin/rush/orders"));
+                adminOrders.value = r2.data || [];
+              } catch {
+                adminOrders.value = [];
+              }
+            } else {
+              adminOrders.value = [];
+            }
+          }
+          function parsePublishItems() {
+            const items = [];
+            for (const line of (publishItemsText.value || "").split(/\r?\n/)) {
+              const t = line.trim();
+              if (!t) continue;
+              const [m, q] = t.split("=");
+              if (!m || !q) throw new Error("原料清单格式应为：每行 material=qty");
+              items.push({ material: m.trim(), qty: Number(q.trim()) });
+            }
+            return items;
+          }
+          async function submit(orderId) {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath(`/student/rush/order/${orderId}/submit`), {
+                product_code: submitProductCode.value,
+                qty: Number(submitQty.value),
+                idempotency_key: submitIdem.value,
+              });
+              ok.value = `已提交：${r.data.qty_submitted}`;
+              submitIdem.value = uuid();
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          async function publish() {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const recipe_items = parsePublishItems();
+              const r = await api.post(mpath("/admin/rush/order"), {
+                product_code: publishProduct.value,
+                craft_code: publishCraft.value,
+                recipe_items,
+                recipe_text: publishDesc.value,
+                demand_qty: Number(publishDemand.value),
+                unit_price_gold: Number(publishPrice.value),
+                settlement_at: publishSettleAt.value,
+                idempotency_key: publishIdem.value,
+              });
+              ok.value = `已发布订单：${r.data.id}`;
+              publishIdem.value = uuid();
+              await load();
+            } catch (e) {
+              msg.value = e?.message || errMsg(e);
+            }
+          }
+          async function settle(orderId, force) {
+            msg.value = "";
+            ok.value = "";
+            try {
+              const r = await api.post(mpath(`/admin/rush/order/${orderId}/settle`), { force: !!force });
+              ok.value = `已结算：accepted=${r.data.accepted_total} rejected=${r.data.rejected_total} paid=${r.data.paid_total}`;
+              await load();
+            } catch (e) {
+              msg.value = errMsg(e);
+            }
+          }
+          Vue.onMounted(load);
+          return {
+            msg,
+            ok,
+            isAdmin,
+            studentOrders,
+            adminOrders,
+            myRecipes,
+            submitQty,
+            submitIdem,
+            submitProductCode,
+            publishProduct,
+            publishCraft,
+            publishItemsText,
+            publishDesc,
+            publishDemand,
+            publishPrice,
+            publishSettleAt,
+            publishIdem,
+            load,
+            submit,
+            publish,
+            settle,
+            UI,
+            Craft,
+            craftName,
+          };
+        },
+        template: `<div class="max-w-6xl space-y-4">
+          <div class="flex items-center gap-3">
+            <h1 class="text-xl font-semibold">抢单（统一结算）</h1>
+            <button type="button" @click="load" class="${UI.btnGhost} ml-auto">刷新</button>
+          </div>
+          <p class="text-sm text-rose-600">{{ msg }}</p>
+          <p class="text-sm text-emerald-700">{{ ok }}</p>
+
+          <div class="${UI.card} p-4 space-y-2">
+            <div class="text-xs text-slate-500">
+              规则：结算时间前可提交产品；到点统一结算。若提交总量≤需求量：全部收购；若提交总量>需求量：按提交时间先后先得；未收购的不返还（提交时已扣库存）。
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3 items-end">
+              <div>
+                <label class="text-xs text-slate-500">我用哪个产品编码提交（看配方中心）</label>
+                <select v-model="submitProductCode" class="${UI.input} mt-1 font-mono text-xs">
+                  <option v-for="r in myRecipes" :key="r.product_code" :value="r.product_code">{{ r.product_code }} - {{ r.product_name }}</option>
+                </select>
+                <div class="text-[11px] text-slate-500 mt-1" v-if="submitProductCode">
+                  工艺：{{ craftName((myRecipes.find(x=>x.product_code===submitProductCode)||{}).craft) }}
+                </div>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">提交数量</label>
+                <input v-model.number="submitQty" type="number" min="1" class="${UI.input} mt-1" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">提交幂等键</label>
+                <input v-model="submitIdem" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+            </div>
+          </div>
+
+          <div class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">学生可抢订单（open）</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b">
+                  <th class="px-3 py-2">结算时间</th><th class="px-3 py-2">展示产品</th><th class="px-3 py-2">工艺</th><th class="px-3 py-2">原料（必须完全一致）</th><th class="px-3 py-2 text-right">需求</th><th class="px-3 py-2 text-right">单价</th><th class="px-3 py-2"></th>
+                </tr></thead>
+                <tbody>
+                  <tr v-for="o in studentOrders" :key="o.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 text-xs whitespace-nowrap">{{ o.settlement_at }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ o.product_code }}</td>
+                    <td class="px-3 py-2 text-xs">{{ craftName(o.craft_code) }}</td>
+                    <td class="px-3 py-2 text-xs font-mono">{{ (o.recipe_items||[]).map(x=>x.material+'='+x.qty).join(', ') || '-' }}</td>
+                    <td class="px-3 py-2 text-right">{{ o.demand_qty }}</td>
+                    <td class="px-3 py-2 text-right">{{ o.unit_price_gold }}</td>
+                    <td class="px-3 py-2 text-right">
+                      <button type="button" class="${UI.btnPrimary}" @click="submit(o.id)">提交</button>
+                    </td>
+                  </tr>
+                  <tr v-if="!studentOrders.length"><td colspan="7" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
+            </div>
+          </div>
+
+          <div v-if="isAdmin" class="${UI.card} p-4 space-y-3">
+            <div class="font-medium text-sm">管理员发布订单</div>
+            <div class="grid grid-cols-1 sm:grid-cols-3 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">产品编码</label>
+                <input v-model="publishProduct" class="${UI.input} mt-1 font-mono text-xs" placeholder="P001" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">工艺（下拉）</label>
+                <select v-model="publishCraft" class="${UI.input} mt-1">
+                  <option v-for="c in (Craft.types||[])" :key="c.code" :value="c.code">{{ c.name }}（{{ c.code }}）</option>
+                </select>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">需求数量</label>
+                <input v-model.number="publishDemand" type="number" min="1" class="${UI.input} mt-1" />
+              </div>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">原料清单（每行 material=qty）</label>
+                <textarea v-model="publishItemsText" class="${UI.input} mt-1 font-mono text-xs" rows="3"></textarea>
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">单价（黄金）</label>
+                <input v-model.number="publishPrice" type="number" min="1" class="${UI.input} mt-1" />
+                <label class="text-xs text-slate-500 mt-3 block">说明（可选）</label>
+                <textarea v-model="publishDesc" class="${UI.input} mt-1" rows="2"></textarea>
+              </div>
+            </div>
+            <div class="grid grid-cols-1 sm:grid-cols-2 gap-3">
+              <div>
+                <label class="text-xs text-slate-500">结算时间（ISO8601）</label>
+                <input v-model="publishSettleAt" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+              <div>
+                <label class="text-xs text-slate-500">发布幂等键</label>
+                <input v-model="publishIdem" class="${UI.input} mt-1 font-mono text-xs" />
+              </div>
+            </div>
+            <button type="button" class="${UI.btnPrimary}" @click="publish">发布</button>
+          </div>
+
+          <div v-if="isAdmin" class="${UI.card} overflow-hidden">
+            <div class="px-4 py-2 border-b text-sm font-medium bg-white/60">管理员订单列表</div>
+            <div class="overflow-x-auto">
+              <table class="min-w-full text-sm">
+                <thead><tr class="text-left text-slate-500 border-b">
+                  <th class="px-3 py-2">状态</th><th class="px-3 py-2">结算时间</th><th class="px-3 py-2">产品</th><th class="px-3 py-2 text-right">需求</th><th class="px-3 py-2 text-right">单价</th><th class="px-3 py-2"></th>
+                </tr></thead>
+                <tbody>
+                  <tr v-for="o in adminOrders" :key="o.id" class="border-b border-slate-100">
+                    <td class="px-3 py-2 font-mono text-xs">{{ o.status }}</td>
+                    <td class="px-3 py-2 text-xs whitespace-nowrap">{{ o.settlement_at }}</td>
+                    <td class="px-3 py-2 font-mono text-xs">{{ o.product_code }}</td>
+                    <td class="px-3 py-2 text-right">{{ o.demand_qty }}</td>
+                    <td class="px-3 py-2 text-right">{{ o.unit_price_gold }}</td>
+                    <td class="px-3 py-2 text-right space-x-2">
+                      <button type="button" class="${UI.btnPrimary}" @click="settle(o.id,false)" :disabled="o.status!=='open'">结算</button>
+                      <button type="button" class="${UI.btnGhost}" @click="settle(o.id,true)" :disabled="o.status!=='open'">强制结算</button>
+                    </td>
+                  </tr>
+                  <tr v-if="!adminOrders.length"><td colspan="6" class="px-3 py-8 text-center text-slate-500">暂无</td></tr>
+                </tbody>
+              </table>
             </div>
           </div>
         </div>`,
@@ -1668,7 +1960,7 @@
                 </div>
                 <div>
                   <label class="text-xs text-slate-500">数量</label>
-                  <input v-model.number="qty" type="number" min="1" class="${UI.input} mt-1" />
+                  <input v-model.number="qty" type="number" min="0.01" step="0.01" class="${UI.input} mt-1" />
                 </div>
                 <div>
                   <label class="text-xs text-slate-500">单价(黄金)</label>
@@ -1976,7 +2268,7 @@
                 <label class="text-xs text-slate-500">发放原料（临时）</label>
                 <div class="flex gap-2 mt-1">
                   <select v-model="grantMaterial" class="${UI.input} w-28"><option>R1</option><option>R2</option><option>R3</option></select>
-                  <input v-model.number="grantQty" type="number" min="1" class="${UI.input}" />
+                  <input v-model.number="grantQty" type="number" min="0.01" step="0.01" class="${UI.input}" />
                   <button type="button" @click="grantMaterialFn" class="${UI.btnPrimary}" :disabled="!grantCompanyId">发放</button>
                 </div>
               </div>
@@ -2562,6 +2854,7 @@
             { path: "manufacture", component: ManufacturingCenter },
             { path: "sales", component: ProductSales },
             { path: "rating", component: AdminProductRating },
+            { path: "rush", component: RushOrders },
             { path: "admin", component: Admin },
           ],
         },

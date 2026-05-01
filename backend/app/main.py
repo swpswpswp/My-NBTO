@@ -303,7 +303,7 @@ async def v2_ledger(request: Request) -> JSONResponse:
                     "gold_delta": x.gold_delta,
                     "carbon_delta": x.carbon_delta,
                     "material": x.material,
-                    "material_delta": x.material_delta,
+                    "material_delta": float(x.material_delta) if x.material_delta is not None else None,
                     "counterparty_company_id": x.counterparty_company_id,
                     "reference_type": x.reference_type,
                     "reference_id": x.reference_id,
@@ -414,6 +414,146 @@ async def v2_admin_company_facilities(request: Request) -> JSONResponse:
             return JSONResponse({"detail": "match_admin_required"}, status_code=403)
         return JSONResponse(await svc.admin_list_company_facilities(s, m.id))
 
+
+async def v2_admin_rush_orders(request: Request) -> JSONResponse:
+    u = auth_user(request)
+    if not u:
+        return JSONResponse({"detail": "invalid_token"}, status_code=401)
+    mk = _match_key(request)
+    status = (request.query_params.get("status") or "").strip() or None
+    async with session_scope() as s:
+        m = await svc.get_match_by_key(s, mk)
+        if not m:
+            return JSONResponse({"detail": "match_not_found"}, status_code=404)
+        is_admin = (u.get("role") == "system_admin") or (await svc.is_match_admin(s, m.id, u["id"]))
+        if not is_admin:
+            return JSONResponse({"detail": "match_admin_required"}, status_code=403)
+        return JSONResponse(await svc.list_rush_orders(s, m.id, status=status))
+
+
+async def v2_admin_rush_order_publish(request: Request) -> JSONResponse:
+    u = auth_user(request)
+    if not u:
+        return JSONResponse({"detail": "invalid_token"}, status_code=401)
+    mk = _match_key(request)
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "invalid_json"}, status_code=400)
+    product_code = str(data.get("product_code") or "")
+    craft_code = str(data.get("craft_code") or "")
+    recipe_items = data.get("recipe_items") or []
+    recipe_text = str(data.get("recipe_text") or "")
+    try:
+        demand_qty = int(data.get("demand_qty"))
+    except Exception:
+        return JSONResponse({"detail": "invalid_demand_qty"}, status_code=400)
+    try:
+        unit_price_gold = int(data.get("unit_price_gold"))
+    except Exception:
+        return JSONResponse({"detail": "invalid_unit_price_gold"}, status_code=400)
+    settlement_at = str(data.get("settlement_at") or "")
+    idem = str(data.get("idempotency_key") or "")
+    if not idem:
+        return JSONResponse({"detail": "idempotency_key_required"}, status_code=400)
+    from datetime import datetime
+
+    try:
+        settle_dt = datetime.fromisoformat(settlement_at)
+    except Exception:
+        return JSONResponse({"detail": "invalid_settlement_at"}, status_code=400)
+    async with session_scope() as s:
+        m = await svc.get_match_by_key(s, mk)
+        if not m:
+            return JSONResponse({"detail": "match_not_found"}, status_code=404)
+        is_admin = (u.get("role") == "system_admin") or (await svc.is_match_admin(s, m.id, u["id"]))
+        if not is_admin:
+            return JSONResponse({"detail": "match_admin_required"}, status_code=403)
+        try:
+            ro = await svc.admin_publish_rush_order(
+                s, m.id, u["id"], product_code, craft_code, recipe_items, recipe_text, demand_qty, unit_price_gold, settle_dt, idem
+            )
+            await s.commit()
+            return JSONResponse({"ok": True, "id": ro.id, "status": ro.status})
+        except ValueError as e:
+            await s.rollback()
+            return JSONResponse({"detail": str(e)}, status_code=400)
+
+
+async def v2_admin_rush_order_settle(request: Request) -> JSONResponse:
+    u = auth_user(request)
+    if not u:
+        return JSONResponse({"detail": "invalid_token"}, status_code=401)
+    mk = _match_key(request)
+    rush_order_id = str(request.path_params.get("rush_order_id") or "")
+    try:
+        data = await request.json()
+    except Exception:
+        data = {}
+    force = bool((data or {}).get("force") or False)
+    async with session_scope() as s:
+        m = await svc.get_match_by_key(s, mk)
+        if not m:
+            return JSONResponse({"detail": "match_not_found"}, status_code=404)
+        is_admin = (u.get("role") == "system_admin") or (await svc.is_match_admin(s, m.id, u["id"]))
+        if not is_admin:
+            return JSONResponse({"detail": "match_admin_required"}, status_code=403)
+        try:
+            r = await svc.admin_settle_rush_order(s, m.id, u["id"], rush_order_id, force=force)
+            await s.commit()
+            return JSONResponse({"ok": True, **r})
+        except ValueError as e:
+            await s.rollback()
+            return JSONResponse({"detail": str(e)}, status_code=400)
+
+
+async def v2_student_rush_orders(request: Request) -> JSONResponse:
+    u = auth_user(request)
+    if not u:
+        return JSONResponse({"detail": "invalid_token"}, status_code=401)
+    mk = _match_key(request)
+    status = (request.query_params.get("status") or "open").strip()
+    async with session_scope() as s:
+        m = await svc.get_match_by_key(s, mk)
+        if not m:
+            return JSONResponse({"detail": "match_not_found"}, status_code=404)
+        return JSONResponse(await svc.list_rush_orders(s, m.id, status=status))
+
+
+async def v2_student_rush_order_submit(request: Request) -> JSONResponse:
+    u = auth_user(request)
+    if not u:
+        return JSONResponse({"detail": "invalid_token"}, status_code=401)
+    mk = _match_key(request)
+    rush_order_id = str(request.path_params.get("rush_order_id") or "")
+    try:
+        data = await request.json()
+    except Exception:
+        return JSONResponse({"detail": "invalid_json"}, status_code=400)
+    product_code = str(data.get("product_code") or "")
+    try:
+        qty = int(data.get("qty"))
+    except Exception:
+        return JSONResponse({"detail": "invalid_qty"}, status_code=400)
+    idem = str(data.get("idempotency_key") or "")
+    if not idem:
+        return JSONResponse({"detail": "idempotency_key_required"}, status_code=400)
+    async with session_scope() as s:
+        m = await svc.get_match_by_key(s, mk)
+        if not m:
+            return JSONResponse({"detail": "match_not_found"}, status_code=404)
+        try:
+            sub = await svc.student_submit_rush_order(s, m.id, u["id"], rush_order_id, product_code, qty, idem)
+            await s.commit()
+            return JSONResponse({"ok": True, "id": sub.id, "status": sub.status, "qty_submitted": sub.qty_submitted})
+        except ValueError as e:
+            await s.rollback()
+            return JSONResponse({"detail": str(e)}, status_code=400)
+
+
+async def v2_craft_types(request: Request) -> JSONResponse:
+    # public enough; used by frontend dropdowns
+    return JSONResponse(svc.CRAFT_TYPES)
 async def v2_student_buy_facility(request: Request) -> JSONResponse:
     u = auth_user(request)
     if not u:
@@ -487,7 +627,7 @@ async def v2_trade_request_create(request: Request) -> JSONResponse:
     to_company_id = str(data.get("to_company_id") or "")
     material = str(data.get("material") or "")
     try:
-        qty = int(data.get("qty"))
+        qty = data.get("qty")
         unit_price_gold = int(data.get("unit_price"))
     except Exception:
         return JSONResponse({"detail": "invalid_params"}, status_code=400)
@@ -507,7 +647,7 @@ async def v2_trade_request_create(request: Request) -> JSONResponse:
                     "from_company_id": tr.from_company_id,
                     "to_company_id": tr.to_company_id,
                     "material": tr.material,
-                    "qty": tr.qty,
+                    "qty": float(tr.qty),
                     "unit_price_gold": tr.unit_price_gold,
                     "status": tr.status,
                 }
@@ -546,7 +686,7 @@ async def v2_trade_requests_outbox(request: Request) -> JSONResponse:
                     "from_company_id": x.from_company_id,
                     "to_company_id": x.to_company_id,
                     "material": x.material,
-                    "qty": x.qty,
+                    "qty": float(x.qty),
                     "unit_price_gold": x.unit_price_gold,
                     "status": x.status,
                     "created_at": x.created_at.isoformat() if x.created_at else None,
@@ -585,7 +725,7 @@ async def v2_trade_requests_inbox(request: Request) -> JSONResponse:
                     "from_company_id": x.from_company_id,
                     "to_company_id": x.to_company_id,
                     "material": x.material,
-                    "qty": x.qty,
+                    "qty": float(x.qty),
                     "unit_price_gold": x.unit_price_gold,
                     "status": x.status,
                     "created_at": x.created_at.isoformat() if x.created_at else None,
@@ -1483,8 +1623,8 @@ async def v2_inventory(request: Request) -> JSONResponse:
             select(Inventory).where(and_(Inventory.match_id == m.id, Inventory.company_id == cid)).order_by(Inventory.material.asc())
         )
         rows = r.scalars().all()
-        raw = [{"material": x.material, "qty": x.qty} for x in rows if x.material in svc.MATERIALS]
-        products = [{"material": x.material, "qty": x.qty} for x in rows if x.material not in svc.MATERIALS]
+        raw = [{"material": x.material, "qty": float(x.qty)} for x in rows if x.material in svc.MATERIALS]
+        products = [{"material": x.material, "qty": float(x.qty)} for x in rows if x.material not in svc.MATERIALS]
         return JSONResponse({"raw": raw, "products": products})
 
 
@@ -1733,6 +1873,7 @@ app = Starlette(
         # v2 auth (PostgreSQL)
         Route("/v2/auth/register", v2_register, methods=["POST"]),
         Route("/v2/auth/login", v2_login, methods=["POST"]),
+        Route("/v2/craft-types", v2_craft_types, methods=["GET"]),
         Route("/v2/system/bootstrap-admin", v2_system_admin_bootstrap, methods=["POST"]),
         Route("/v2/matches", v2_match_create, methods=["POST"]),
         # v2 match-scoped
@@ -1770,6 +1911,9 @@ app = Starlette(
         Route("/m/{match_key:str}/admin/export/ledger.csv", v2_admin_ledger_export_csv, methods=["GET"]),
         Route("/m/{match_key:str}/admin/export/audit.csv", v2_admin_audit_export_csv, methods=["GET"]),
         Route("/m/{match_key:str}/admin/facilities/companies", v2_admin_company_facilities, methods=["GET"]),
+        Route("/m/{match_key:str}/admin/rush/orders", v2_admin_rush_orders, methods=["GET"]),
+        Route("/m/{match_key:str}/admin/rush/order", v2_admin_rush_order_publish, methods=["POST"]),
+        Route("/m/{match_key:str}/admin/rush/order/{rush_order_id:str}/settle", v2_admin_rush_order_settle, methods=["POST"]),
         Route("/m/{match_key:str}/student/recipes", v2_student_recipe_list, methods=["GET"]),
         Route("/m/{match_key:str}/student/recipe", v2_student_recipe_upsert, methods=["POST"]),
         Route("/m/{match_key:str}/student/manufacture", v2_student_manufacture, methods=["POST"]),
@@ -1779,6 +1923,8 @@ app = Starlette(
         Route("/m/{match_key:str}/student/product/listing/{listing_id:str}/buy", v2_student_product_listing_buy, methods=["POST"]),
         Route("/m/{match_key:str}/student/product/consumer-sell", v2_student_consumer_sell, methods=["POST"]),
         Route("/m/{match_key:str}/admin/product/listing/{listing_id:str}/rate", v2_admin_product_listing_rate, methods=["POST"]),
+        Route("/m/{match_key:str}/student/rush/orders", v2_student_rush_orders, methods=["GET"]),
+        Route("/m/{match_key:str}/student/rush/order/{rush_order_id:str}/submit", v2_student_rush_order_submit, methods=["POST"]),
         # legacy routes (in-memory MVP) kept for now
         Route("/auth/login", login, methods=["POST"]),
         Route("/student/me", me, methods=["GET"]),

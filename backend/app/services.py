@@ -3,6 +3,11 @@ from __future__ import annotations
 import csv
 import io
 import uuid
+import json
+import hashlib
+import json
+import hashlib
+from decimal import Decimal, ROUND_HALF_UP
 from datetime import datetime, timezone
 
 from sqlalchemy import and_, select
@@ -23,6 +28,8 @@ from app.models import (
     MatchSetting,
     Product,
     ProductListing,
+    RushOrder,
+    RushOrderSubmission,
     Recipe,
     RecipeItem,
     SystemAdmin,
@@ -35,8 +42,64 @@ from app.security import hash_password, verify_password
 def now_utc() -> datetime:
     return datetime.now(tz=timezone.utc)
 
+QTY_QUANT = Decimal("0.01")
+
+
+def parse_qty_2dp(v: object) -> Decimal:
+    try:
+        d = Decimal(str(v))
+    except Exception:
+        raise ValueError("invalid_qty")
+    d = d.quantize(QTY_QUANT, rounding=ROUND_HALF_UP)
+    if d <= 0:
+        raise ValueError("qty_must_be_positive")
+    return d
+
 
 MATERIALS = ("R1", "R2", "R3")
+
+CRAFT_TYPES: list[dict[str, str]] = [
+    {"code": "CRAFT_A", "name": "工艺A"},
+    {"code": "CRAFT_B", "name": "工艺B"},
+]
+_CRAFT_CODE_SET = {x["code"] for x in CRAFT_TYPES}
+
+
+def validate_craft_code(craft_code: str) -> str:
+    cc = (craft_code or "").strip()
+    if not cc:
+        raise ValueError("craft_required")
+    if cc not in _CRAFT_CODE_SET:
+        raise ValueError("invalid_craft")
+    return cc
+
+
+def recipe_fingerprint(craft_code: str, items: list[dict]) -> tuple[str, str]:
+    """
+    Strict match:
+    - craft_code exactly equal
+    - materials set exactly equal (no extra/missing)
+    - qty exactly equal at 2dp (Decimal quantized)
+    Returns (recipe_hash, canonical_items_json).
+    """
+    cc = validate_craft_code(craft_code)
+    norm: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for it in (items or []):
+        m = str((it or {}).get("material") or "").strip()
+        if not m:
+            raise ValueError("recipe_item_material_required")
+        if m in seen:
+            raise ValueError("duplicate_material")
+        seen.add(m)
+        q = parse_qty_2dp((it or {}).get("qty"))
+        norm.append({"material": m, "qty": format(q, "f")})
+    if not norm:
+        raise ValueError("recipe_items_required")
+    norm.sort(key=lambda x: x["material"])
+    canon = json.dumps({"craft": cc, "items": norm}, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    h = hashlib.sha256(canon.encode("utf-8")).hexdigest()
+    return h, json.dumps(norm, ensure_ascii=False, separators=(",", ":"))
 
 # 设施目录：(code, 显示名, 关联原料或 None, gold_cost, carbon_cost)
 # 成本占位：后续统一在库里改 FacilityType 即可；导出「设施价值」按 gold_cost * 持有数量全价计入
@@ -74,7 +137,7 @@ async def ensure_company_assets(s: AsyncSession, match_id: str, company_id: str)
             select(Inventory).where(and_(Inventory.match_id == match_id, Inventory.company_id == company_id, Inventory.material == m))
         )
         if not r2.scalar_one_or_none():
-            s.add(Inventory(match_id=match_id, company_id=company_id, material=m, qty=0))
+            s.add(Inventory(match_id=match_id, company_id=company_id, material=m, qty=Decimal("0.00")))
 
 
 async def create_user(s: AsyncSession, username: str, password: str) -> User:
@@ -823,7 +886,7 @@ async def lock_inventory(s: AsyncSession, match_id: str, company_id: str, materi
     if inv:
         return inv
     # create-on-demand (products or new material codes)
-    s.add(Inventory(match_id=match_id, company_id=company_id, material=material, qty=0))
+    s.add(Inventory(match_id=match_id, company_id=company_id, material=material, qty=Decimal("0.00")))
     await s.flush()
     r2 = await s.execute(q)
     inv2 = r2.scalar_one_or_none()
@@ -928,6 +991,266 @@ def encode_csv_utf8_bom(headers: list[str], rows: list[list[object]]) -> bytes:
     return buf.getvalue().encode("utf-8-sig")
 
 
+async def admin_publish_rush_order(
+    s: AsyncSession,
+    match_id: str,
+    actor_user_id: str,
+    product_code: str,
+    craft_code: str,
+    recipe_items: list[dict],
+    recipe_text: str,
+    demand_qty: int,
+    unit_price_gold: int,
+    settlement_at: datetime,
+    idem: str,
+) -> RushOrder:
+    product_code = product_code.strip()
+    if not product_code:
+        raise ValueError("product_code_required")
+    if len(product_code) > 16:
+        raise ValueError("product_code_too_long")
+    recipe_text = (recipe_text or "").strip()
+    if len(recipe_text) > 512:
+        raise ValueError("recipe_too_long")
+    recipe_hash, recipe_items_json = recipe_fingerprint(craft_code, recipe_items or [])
+    if demand_qty <= 0 or unit_price_gold <= 0:
+        raise ValueError("qty_and_price_must_be_positive")
+    r0 = await s.execute(select(RushOrder).where(and_(RushOrder.match_id == match_id, RushOrder.idempotency_key == idem)))
+    ro0 = r0.scalar_one_or_none()
+    if ro0:
+        return ro0
+    ro = RushOrder(
+        match_id=match_id,
+        created_by_user_id=actor_user_id,
+        product_code=product_code,
+        craft_code=validate_craft_code(craft_code),
+        recipe_items_json=recipe_items_json,
+        recipe_hash=recipe_hash,
+        recipe_text=recipe_text,
+        demand_qty=demand_qty,
+        unit_price_gold=unit_price_gold,
+        settlement_at=settlement_at,
+        status="open",
+        idempotency_key=idem,
+        created_at=now_utc(),
+        settled_at=None,
+    )
+    s.add(ro)
+    await s.flush()
+    s.add(
+        AuditLog(
+            match_id=match_id,
+            actor_user_id=actor_user_id,
+            actor_role="match_admin",
+            action="rush_order_publish",
+            reference_type="rush_order",
+            reference_id=ro.id,
+            message=f"{product_code} craft={ro.craft_code} hash={ro.recipe_hash[:10]} demand={demand_qty} price={unit_price_gold} settle={settlement_at.isoformat()}",
+            created_at=now_utc(),
+        )
+    )
+    return ro
+
+
+async def list_rush_orders(s: AsyncSession, match_id: str, status: str | None = None) -> list[dict]:
+    q = select(RushOrder).where(RushOrder.match_id == match_id)
+    if status:
+        q = q.where(RushOrder.status == status)
+    q = q.order_by(RushOrder.created_at.desc()).limit(200)
+    rows = (await s.execute(q)).scalars().all()
+    return [
+        {
+            "id": x.id,
+            "product_code": x.product_code,
+            "craft_code": x.craft_code,
+            "recipe_hash": x.recipe_hash,
+            "recipe_items": (json.loads(x.recipe_items_json) if (x.recipe_items_json or "").strip() else []),
+            "recipe_text": x.recipe_text,
+            "demand_qty": x.demand_qty,
+            "unit_price_gold": x.unit_price_gold,
+            "settlement_at": x.settlement_at.isoformat() if x.settlement_at else None,
+            "status": x.status,
+            "created_at": x.created_at.isoformat() if x.created_at else None,
+            "settled_at": x.settled_at.isoformat() if x.settled_at else None,
+        }
+        for x in rows
+    ]
+
+
+async def student_submit_rush_order(
+    s: AsyncSession,
+    match_id: str,
+    actor_user_id: str,
+    rush_order_id: str,
+    product_code: str,
+    qty: int,
+    idem: str,
+) -> RushOrderSubmission:
+    if qty <= 0:
+        raise ValueError("qty_must_be_positive")
+    company_id = await get_user_company_id(s, match_id, actor_user_id)
+    if not company_id:
+        raise ValueError("user_not_in_company")
+    # idempotency
+    r0 = await s.execute(
+        select(RushOrderSubmission).where(
+            and_(
+                RushOrderSubmission.match_id == match_id,
+                RushOrderSubmission.rush_order_id == rush_order_id,
+                RushOrderSubmission.company_id == company_id,
+                RushOrderSubmission.idempotency_key == idem,
+            )
+        )
+    )
+    sub0 = r0.scalar_one_or_none()
+    if sub0:
+        return sub0
+
+    q = select(RushOrder).where(and_(RushOrder.match_id == match_id, RushOrder.id == rush_order_id)).with_for_update()
+    ro = (await s.execute(q)).scalar_one_or_none()
+    if not ro:
+        raise ValueError("rush_order_not_found")
+    if ro.status != "open":
+        raise ValueError("rush_order_not_open")
+    if ro.settlement_at and now_utc() >= ro.settlement_at:
+        raise ValueError("rush_order_closed")
+
+    if not ro.recipe_hash:
+        raise ValueError("rush_order_recipe_not_configured")
+    _craft, recipe_hash = await get_company_recipe_fingerprint_for_product_code(s, match_id, company_id, product_code)
+    if recipe_hash != ro.recipe_hash:
+        raise ValueError("rush_order_recipe_mismatch")
+
+    # consume products immediately (no return)
+    inv = await lock_inventory(s, match_id, company_id, product_code)
+    if inv.qty < qty:
+        raise ValueError("product_insufficient")
+    inv.qty -= qty
+
+    sub = RushOrderSubmission(
+        match_id=match_id,
+        rush_order_id=ro.id,
+        company_id=company_id,
+        product_code=product_code,
+        recipe_hash=recipe_hash,
+        qty_submitted=qty,
+        submitted_at=now_utc(),
+        idempotency_key=idem,
+        status="submitted",
+        qty_accepted=0,
+        settled_at=None,
+    )
+    s.add(sub)
+    await s.flush()
+    s.add(
+        AuditLog(
+            match_id=match_id,
+            actor_user_id=actor_user_id,
+            actor_role="student",
+            action="rush_order_submit",
+            subject_company_id=company_id,
+            reference_type="rush_order",
+            reference_id=ro.id,
+            message=f"product={product_code} qty={qty}",
+            created_at=now_utc(),
+        )
+    )
+    return sub
+
+
+async def admin_settle_rush_order(s: AsyncSession, match_id: str, actor_user_id: str, rush_order_id: str, force: bool = False) -> dict:
+    q = select(RushOrder).where(and_(RushOrder.match_id == match_id, RushOrder.id == rush_order_id)).with_for_update()
+    ro = (await s.execute(q)).scalar_one_or_none()
+    if not ro:
+        raise ValueError("rush_order_not_found")
+    if ro.status != "open":
+        return {"id": ro.id, "status": ro.status, "cached": True}
+    if (not force) and ro.settlement_at and now_utc() < ro.settlement_at:
+        raise ValueError("settlement_time_not_reached")
+
+    # lock all submissions and settle earliest first
+    subs = (
+        await s.execute(
+            select(RushOrderSubmission)
+            .where(and_(RushOrderSubmission.match_id == match_id, RushOrderSubmission.rush_order_id == ro.id))
+            .order_by(RushOrderSubmission.submitted_at.asc())
+            .with_for_update()
+        )
+    ).scalars().all()
+
+    remaining = int(ro.demand_qty)
+    accepted_total = 0
+    rejected_total = 0
+    paid_total = 0
+
+    # lock assets for all involved companies (stable order)
+    company_ids = sorted({x.company_id for x in subs})
+    for cid in company_ids:
+        _ = await lock_company_asset(s, match_id, cid)
+
+    for sub in subs:
+        if sub.status != "submitted":
+            continue
+        accept = 0
+        if remaining > 0:
+            accept = min(int(sub.qty_submitted), remaining)
+        if accept > 0:
+            sub.status = "accepted"
+            sub.qty_accepted = accept
+            remaining -= accept
+            accepted_total += accept
+            payout = accept * int(ro.unit_price_gold)
+            paid_total += payout
+            a = await lock_company_asset(s, match_id, sub.company_id)
+            a.gold_balance += payout
+            # ledger for accepted
+            s.add(
+                LedgerEntry(
+                    match_id=match_id,
+                    company_id=sub.company_id,
+                    kind="rush_order_sell",
+                    gold_delta=payout,
+                    carbon_delta=0,
+                    material=sub.product_code,
+                    material_delta=-accept,
+                    counterparty_company_id=None,
+                    reference_type="rush_order",
+                    reference_id=ro.id,
+                    idempotency_key=f"rush:{ro.id}:{sub.id}:sell",
+                    created_at=now_utc(),
+                    actor_user_id=actor_user_id,
+                )
+            )
+        else:
+            sub.status = "rejected"
+            sub.qty_accepted = 0
+            rejected_total += int(sub.qty_submitted)
+        sub.settled_at = now_utc()
+
+    ro.status = "settled"
+    ro.settled_at = now_utc()
+    s.add(
+        AuditLog(
+            match_id=match_id,
+            actor_user_id=actor_user_id,
+            actor_role="match_admin",
+            action="rush_order_settle",
+            reference_type="rush_order",
+            reference_id=ro.id,
+            message=f"accepted={accepted_total} rejected={rejected_total} paid={paid_total}",
+            created_at=now_utc(),
+        )
+    )
+    return {
+        "id": ro.id,
+        "status": ro.status,
+        "accepted_total": accepted_total,
+        "rejected_total": rejected_total,
+        "paid_total": paid_total,
+        "demand_qty": ro.demand_qty,
+    }
+
+
 async def upsert_company_recipe(
     s: AsyncSession,
     match_id: str,
@@ -948,8 +1271,7 @@ async def upsert_company_recipe(
     if len(product_name) > 128:
         raise ValueError("product_name_too_long")
     craft = (craft or "").strip()
-    if len(craft) > 512:
-        raise ValueError("craft_too_long")
+    craft = validate_craft_code(craft)
     if not isinstance(items, list) or not items:
         raise ValueError("recipe_items_required")
 
@@ -979,13 +1301,11 @@ async def upsert_company_recipe(
     for it in items:
         mat = str(it.get("material") or "").strip()
         try:
-            qty = int(it.get("qty"))
-        except Exception:
-            raise ValueError("invalid_recipe_item_qty")
+            qty = parse_qty_2dp(it.get("qty"))
+        except ValueError as e:
+            raise ValueError(str(e))
         if not mat:
             raise ValueError("recipe_item_material_required")
-        if qty <= 0:
-            raise ValueError("recipe_item_qty_must_be_positive")
         s.add(RecipeItem(recipe_id=rec.id, material=mat, qty=qty))
 
     s.add(
@@ -1025,6 +1345,29 @@ async def list_company_recipes(s: AsyncSession, match_id: str, company_id: str) 
             }
         )
     return out
+
+
+async def get_company_recipe_fingerprint_for_product_code(
+    s: AsyncSession, match_id: str, company_id: str, product_code: str
+) -> tuple[str, str]:
+    product_code = (product_code or "").strip()
+    if not product_code:
+        raise ValueError("product_code_required")
+    p = (
+        await s.execute(select(Product).where(and_(Product.match_id == match_id, Product.code == product_code)))
+    ).scalar_one_or_none()
+    if not p:
+        raise ValueError("product_not_found")
+    rec = (
+        await s.execute(select(Recipe).where(and_(Recipe.match_id == match_id, Recipe.company_id == company_id, Recipe.product_id == p.id)))
+    ).scalar_one_or_none()
+    if not rec:
+        raise ValueError("recipe_not_found_for_product")
+    items = (
+        await s.execute(select(RecipeItem).where(RecipeItem.recipe_id == rec.id).order_by(RecipeItem.material.asc()))
+    ).scalars().all()
+    h, _canon_items_json = recipe_fingerprint(rec.craft, [{"material": x.material, "qty": x.qty} for x in items])
+    return validate_craft_code(rec.craft), h
 
 
 async def manufacture_product(
@@ -1583,7 +1926,8 @@ async def create_trade_request(
     if len(material) > 16:
         # TradeRequest.material column is String(16) for now; keep constraint explicit
         raise ValueError("material_too_long")
-    if qty <= 0 or unit_price_gold <= 0:
+    qty_d = parse_qty_2dp(qty)
+    if unit_price_gold <= 0:
         raise ValueError("qty_and_price_must_be_positive")
     from_company_id = await get_user_company_id(s, match_id, from_user_id)
     if not from_company_id:
@@ -1599,7 +1943,7 @@ async def create_trade_request(
         from_company_id=from_company_id,
         to_company_id=to_company_id,
         material=material,
-        qty=qty,
+        qty=qty_d,
         unit_price_gold=unit_price_gold,
         status="pending",
         idempotency_key=idem,
@@ -1617,7 +1961,7 @@ async def create_trade_request(
             target_company_id=to_company_id,
             reference_type="trade_request",
             reference_id=tr.id,
-            message=f"{material} qty={qty} price={unit_price_gold}",
+            message=f"{material} qty={qty_d} price={unit_price_gold}",
             created_at=now_utc(),
         )
     )
@@ -1680,7 +2024,7 @@ async def settle_trade_request(s: AsyncSession, match_id: str, actor_user_id: st
 
     seller_id = tr.from_company_id
     buyer_id = tr.to_company_id
-    total = tr.qty * tr.unit_price_gold
+    total = int((Decimal(str(tr.qty)) * Decimal(int(tr.unit_price_gold))).quantize(Decimal("1"), rounding=ROUND_HALF_UP))
     ref_id = str(uuid.uuid4())
 
     # lock rows in stable order to reduce deadlocks
@@ -1694,13 +2038,13 @@ async def settle_trade_request(s: AsyncSession, match_id: str, actor_user_id: st
     a_seller = await lock_company_asset(s, match_id, seller_id)
     a_buyer = await lock_company_asset(s, match_id, buyer_id)
 
-    if inv_seller.qty < tr.qty:
+    if Decimal(str(inv_seller.qty)) < Decimal(str(tr.qty)):
         raise ValueError("seller_stock_insufficient")
     if a_buyer.gold_balance < total:
         raise ValueError("buyer_gold_insufficient")
 
-    inv_seller.qty -= tr.qty
-    inv_buyer.qty += tr.qty
+    inv_seller.qty = Decimal(str(inv_seller.qty)) - Decimal(str(tr.qty))
+    inv_buyer.qty = Decimal(str(inv_buyer.qty)) + Decimal(str(tr.qty))
     a_buyer.gold_balance -= total
     a_seller.gold_balance += total
 
@@ -1713,7 +2057,7 @@ async def settle_trade_request(s: AsyncSession, match_id: str, actor_user_id: st
             gold_delta=total,
             carbon_delta=0,
             material=tr.material,
-            material_delta=-tr.qty,
+            material_delta=-(Decimal(str(tr.qty))),
             counterparty_company_id=buyer_id,
             reference_type="trade",
             reference_id=ref_id,
@@ -1730,7 +2074,7 @@ async def settle_trade_request(s: AsyncSession, match_id: str, actor_user_id: st
             gold_delta=-total,
             carbon_delta=0,
             material=tr.material,
-            material_delta=tr.qty,
+            material_delta=Decimal(str(tr.qty)),
             counterparty_company_id=seller_id,
             reference_type="trade",
             reference_id=ref_id,
